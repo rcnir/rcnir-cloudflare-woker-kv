@@ -39,7 +39,7 @@ async function handle(request, env) {
   }
   
   // 2. アクセス元を分類してロギング
-  const servicePattern = /(python-requests|aiohttp|monitor|insights)/i;
+  const servicePattern = /(python-requests|aiohttp|monitor|insights|lighthouse)/i;
   const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
   let label;
   if (servicePattern.test(ua)) {
