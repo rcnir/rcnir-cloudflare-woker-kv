@@ -1,26 +1,29 @@
 name: Update AMAZON_IPS daily
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:        # 手動実行ボタン
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *'     # 毎日 0:00 UTC
 
 jobs:
   update-kv:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Fetch Amazon IPs
         run: |
-          curl https://ip-ranges.amazonaws.com/ip-ranges.json | \
-          jq '[.prefixes[] | select(.service == "AMAZON") | .ip_prefix]' > amazon-ips.json
+          curl -s https://ip-ranges.amazonaws.com/ip-ranges.json |
+          jq '[.prefixes[] | select(.service=="AMAZON") | .ip_prefix]' > amazon-ips.json
 
       - name: Upload to Cloudflare KV
         uses: cloudflare/wrangler-action@v3
         with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
+          apiToken:  ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           preCommands: |
-            wrangler kv:key put --namespace-id=${{ secrets.CF_KV_NAMESPACE_ID }} AMAZON_IPS "$(cat amazon-ips.json)"
+            npx wrangler kv:key put \
+              --namespace-id=${{ secrets.KV_NAMESPACE_ID }} \
+              AMAZON_IPS "$(cat amazon-ips.json)"
