@@ -3,7 +3,7 @@
  *
  * 機能:
  * 1. 静的アセットへのアクセスを無視
- * 2. 多言語サイトへのクローリング攻撃（ロケールファンアウト）を検知し、一時的にブロック
+ * 2. 人間のフリをしたBotによる多言語クローリング（ロケールファンアウト）を検知し、一時的にブロック
  * 3. 開発者自身のアクセスをCookieで判定し、ブロックチェックから除外
  * 4. User-Agentに基づき、アクセスをHuman[H], Bot[B], Service[S]に分類してロギング
  * 5. AmazonProductDiscovery/1.0 を名乗る偽装Botを、正規IP以外からのアクセスの場合のみブロック
@@ -38,18 +38,7 @@ async function handle(request, env) {
     return fetch(request);
   }
   
-  // 2. 開発者自身のアクセスを除外（ロケールファンアウトチェック）
-  // "bypass_fanout=true" というCookieがあれば、チェックをスキップ
-  if (!cookie.includes('bypass_fanout=true')) {
-    const locale = extractLocale(path);
-    const fanout = await localeFanoutCheck(ip, locale, env);
-    if (!fanout.allow) {
-      console.log(`[LF-BLOCK] ${request.url} IP=${ip} UA=${ua} reason=${fanout.reason || 'locale-fanout'}`);
-      return new Response('Not Found', { status: 404 });
-    }
-  }
-
-  // 3. アクセス元を分類してロギング
+  // 2. アクセス元を分類してロギング
   const servicePattern = /(python-requests|aiohttp|monitor|insights)/i;
   const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
   let label;
@@ -61,6 +50,20 @@ async function handle(request, env) {
     label = '[H]'; // Human
   }
   console.log(`${label} ${request.url} IP=${ip} UA=${ua}`);
+
+  // 3. 人間[H]と判定されたアクセスのみ、追加の振る舞いチェック
+  if (label === '[H]') {
+    // 開発者自身のアクセスはCookieで除外
+    if (!cookie.includes('bypass_fanout=true')) {
+      const locale = extractLocale(path);
+      const fanout = await localeFanoutCheck(ip, locale, env);
+      if (!fanout.allow) {
+        // 人間のフリをしたBotの可能性が高いアクセスをブロック
+        console.log(`[H-LF-BLOCK] ${request.url} IP=${ip} UA=${ua} reason=${fanout.reason || 'locale-fanout'}`);
+        return new Response('Not Found', { status: 404 });
+      }
+    }
+  }
 
   // 4. Amazon偽装Bot対策
   if (ua.includes('AmazonProductDiscovery/1.0')) {
@@ -159,7 +162,7 @@ function ipToBigInt(ip) {
 
 // --- ロケールファンアウトKV関連 ---
 
-const LOCALE_WINDOW = 30 * 1000;      // 30秒
+const LOCALE_WINDOW = 10 * 1000;      // 10秒に設定
 const LOCALE_THRESHOLD = 3;           // 3ロケール以上でブロック
 const BLOCK_DURATION = 24 * 3600 * 1000; // 24時間
 
