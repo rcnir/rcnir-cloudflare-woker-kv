@@ -1,32 +1,31 @@
 name: Update AMAZON_IPS daily
 
 on:
-  workflow_dispatch:          # 右上 Run workflow ボタン用
+  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'       # 毎日 00:00 UTC
+    - cron: '0 0 * * *'   # 毎日 00:00 UTC
 
 jobs:
   update-kv:
     runs-on: ubuntu-latest
 
     steps:
-      # 1) リポジトリ取得
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      # 2) AWS 公式 IP レンジから "service":"AMAZON" だけ抽出
       - name: Fetch Amazon IP ranges
         run: |
           curl -s https://ip-ranges.amazonaws.com/ip-ranges.json \
           | jq '[ .prefixes[] | select(.service=="AMAZON") | .ip_prefix ]' \
           > amazon-ips.json
 
-      # 3) Cloudflare KV へ一括アップロード
       - name: Upload to Cloudflare KV
         uses: cloudflare/wrangler-action@v3
         with:
-          apiToken:  ${{ secrets.CF_API_TOKEN }}   # 既存シークレット
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}  # 既存シークレット
-          # wrangler.toml に定義した binding = "BOT_BLOCKER_KV" を利用
+          apiToken:  ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
           preCommands: >
-            npx wrangler kv:key put --binding=BOT_BLOCKER_KV AMAZON_IPS "$(cat amazon-ips.json)"
+            npx wrangler kv:key put
+            --binding=BOT_BLOCKER_KV
+            AMAZON_IPS
+            --path amazon-ips.json
