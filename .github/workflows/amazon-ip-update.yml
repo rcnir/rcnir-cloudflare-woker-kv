@@ -1,8 +1,9 @@
 name: Update AMAZON_IPS daily
 
 on:
+  workflow_dispatch:    # ← 手動で「Run workflow」ボタンが現れます
   schedule:
-    - cron: '0 3 * * *'  # 毎日 3:00 UTC（日本時間 12:00 実行）
+    - cron: '0 3 * * *'  # 毎日 03:00 UTC（日本時間 12:00 実行）
 
 jobs:
   update-kv:
