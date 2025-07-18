@@ -1,8 +1,16 @@
-name = "update-amazon-ips"
+name = "shopify-bot-blocker"
 account_id = "d704bf18761786d3e83701e3857f1afe"
+main = "src/index.js"
 compatibility_date = "2025-07-18"
+# optional: usage_model = "bundled"
+# optional: workers_dev = true
 
-# KV namespaces binding
-kv_namespaces = [
-  { binding = "BOT_BLOCKER_KV", id = "7da99382fc3945bd87bc65f55c9ea1fb" }
-]
+# Bot 判定用 CIDR リスト
+[[kv_namespaces]]
+binding = "BOT_BLOCKER_KV"
+id = "7da99382fc3945bd87bc65f55c9ea1fb"
+
+# ロケールファンアウト制御用
+[[kv_namespaces]]
+binding = "LOCALE_FANOUT"
+id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # 取得した ID に置換
