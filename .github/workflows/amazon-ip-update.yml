@@ -1,0 +1,31 @@
+name: Update AMAZON_IPS daily
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # 毎日 3:00 UTC（日本時間12:00）
+
+jobs:
+  update-kv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Fetch Amazon IP Ranges
+        run: |
+          curl -s https://ip-ranges.amazonaws.com/ip-ranges.json -o amazon-ip-ranges.json
+
+      - name: Format IPs and Save as JSON
+        run: |
+          jq -c '[.prefixes[] | select(.service == "AMAZON") | .ip_prefix]' amazon-ip-ranges.json > amazon-ips.json
+
+      - name: Upload to Cloudflare KV
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
+        run: |
+          curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/AMAZON_IPS" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @amazon-ips.json
