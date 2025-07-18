@@ -2,30 +2,28 @@ name: Update AMAZON_IPS daily
 
 on:
   schedule:
-    - cron: '0 3 * * *'  # 毎日 3:00 UTC（日本時間12:00）
+    - cron: '0 3 * * *'  # 毎日 3:00 UTC（日本時間 12:00 実行）
 
 jobs:
   update-kv:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Fetch Amazon IP Ranges
+      - name: Download AWS IP ranges
         run: |
-          curl -s https://ip-ranges.amazonaws.com/ip-ranges.json -o amazon-ip-ranges.json
+          curl -s https://ip-ranges.amazonaws.com/ip-ranges.json -o ip-ranges.json
 
-      - name: Format IPs and Save as JSON
+      - name: Extract only AMAZON IP prefixes
         run: |
-          jq -c '[.prefixes[] | select(.service == "AMAZON") | .ip_prefix]' amazon-ip-ranges.json > amazon-ips.json
+          jq -c '[.prefixes[] | select(.service=="AMAZON") | .ip_prefix]' ip-ranges.json > amazon-ips.json
 
       - name: Upload to Cloudflare KV
-        env:
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
-        run: |
-          curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/AMAZON_IPS" \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data-binary @amazon-ips.json
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          preCommands: |
+            wrangler kv:key put --binding=BOT_BLOCKER_KV AMAZON_IPS "$(cat amazon-ips.json)"
