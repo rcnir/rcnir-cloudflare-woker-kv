@@ -1,4 +1,12 @@
-addEventListener('fetch', e => e.respondWith(handle(e.request)));
+
+
+export default {
+  async fetch(request, env, ctx) {
+    // handle関数を呼び出し、envオブジェクトを渡す
+    return handle(request, env);
+  }
+};
+
 async function handle(request, env) {
   const ua = request.headers.get('User-Agent') || 'UA_NOT_FOUND';
   const ip = request.headers.get('CF-Connecting-IP') || 'IP_NOT_FOUND';
@@ -26,12 +34,12 @@ async function handle(request, env) {
   }
 
   // 4. Bot ラベル付与
-  const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot|python-requests|aiohttp|monitor|insights)/i;
+  const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
   const isBot = botPattern.test(ua);
   const label = isBot ? '[B]' : '[H]';
   console.log(`${label} ${request.url} IP=${ip} UA=${ua}`);
 
-  // 5. Amazon偽装 Bot 対策（従来通り）
+  // 5. Amazon偽装 Bot 対策
   if (!ua.includes('AmazonProductDiscovery/1.0')) {
     return fetch(request);
   }
@@ -70,13 +78,14 @@ function ipInCidr(ip, cidr) {
 const toInt = s => s.split('.').reduce((a, o) => (a << 8) + +o, 0) >>> 0;
 
 // ====== ロケールファンアウト KV ======
-const LOCALE_WINDOW = 30 * 1000;        // 30秒
-const LOCALE_THRESHOLD = 3;             // 3ロケール以上
-const BLOCK_DURATION = 24 * 3600 * 1000;
+const LOCALE_WINDOW = 30 * 1000;      // 30秒
+const LOCALE_THRESHOLD = 3;           // 3ロケール以上
+const BLOCK_DURATION = 24 * 3600 * 1000; // 24時間
 
 async function localeFanoutCheck(ip, locale, env) {
   if (!ip) return { allow: true };
   const now = Date.now();
+  // envオブジェクトが渡ってくるので、env.LOCALE_FANOUTが正しく参照できる
   const raw = await env.LOCALE_FANOUT.get(ip);
   let data = raw ? JSON.parse(raw) : { locales: {}, blockedUntil: 0 };
 
@@ -93,10 +102,10 @@ async function localeFanoutCheck(ip, locale, env) {
   const fanout = Object.keys(data.locales).length;
   if (fanout >= LOCALE_THRESHOLD) {
     data.blockedUntil = now + BLOCK_DURATION;
-    await env.LOCALE_FANOUT.put(ip, JSON.stringify(data), { expirationTtl: 2 * 24 * 3600 });
+    await env.LOCALE_FANOUT.put(ip, JSON.stringify(data), { expirationTtl: 2 * 24 * 3600 }); // 48時間でKVから消去
     return { allow: false, reason: `locale-fanout(${fanout})` };
   } else {
-    await env.LOCALE_FANOUT.put(ip, JSON.stringify(data), { expirationTtl: 24 * 3600 });
+    await env.LOCALE_FANOUT.put(ip, JSON.stringify(data), { expirationTtl: 24 * 3600 }); // 24時間でKVから消去
     return { allow: true };
   }
 }
