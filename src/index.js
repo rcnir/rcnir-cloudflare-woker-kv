@@ -1,5 +1,5 @@
 addEventListener('fetch', e => e.respondWith(handle(e.request)));
-  // 0. 反映されたかちぇっく
+ 
 async function handle(request, env) {
   const ua = request.headers.get('User-Agent') || 'UA_NOT_FOUND';
   const ip = request.headers.get('CF-Connecting-IP') || 'IP_NOT_FOUND';
