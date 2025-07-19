@@ -8,6 +8,21 @@
  * 4. ipToBigInt:           IPアドレスをBigIntに変換する関数 (IPv4/v6対応)
  * 5. ipInCidr:             IPアドレスがCIDR範囲内かチェックする関数 (IPv4/v6対応)
  * 6. localeFanoutCheck:    振る舞い検知・段階的ブロックを行う関数
+ *
+ * =================================================================
+ * 便利なコマンド (Useful Commands)
+ * =================================================================
+ *
+ * H判定（人間）のログをリアルタイム表示:
+ * npx wrangler tail shopify-bot-blocker --format=pretty | grep "\[H\]"
+ *
+ * B判定（ボット）のログをリアルタイム表示:
+ * npx wrangler tail shopify-bot-blocker --format=pretty | grep "\[B\]"
+ *
+ * ブロックされたIPのログ一覧を表示 (プレフィックスで絞り込み):
+ * ※ `LOCALE_FANOUT` は実際のKV名前空間バインディング名に置き換えてください
+ * npx wrangler kv:key list --binding=LOCALE_FANOUT --prefix="blocked:"
+ *
  * =================================================================
  */
 
