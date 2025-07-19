@@ -9,52 +9,53 @@ on:
 jobs:
   update-lists:
     runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js and wrangler
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - run: npm install -g wrangler jq
 
-      - name: Install dependencies
-        run: |
-          npm install -g wrangler
-          sudo apt-get update && sudo apt-get install -y jq
-
-      # --- Job 1: Update IP CIDRs and save to KV ---
+      # --- Job 1: Amazon IP CIDRs を KV にアップロード ---
       - name: Fetch and Prepare IP CIDRs
         run: |
-          # Amazon IP Ranges
+          mkdir -p bot-ip-lists
           curl -s https://ip-ranges.amazonaws.com/ip-ranges.json \
           | jq '[.prefixes[] | select(.service=="AMAZON") | .ip_prefix]' \
           > bot-ip-lists/amazon.json
-          
-          # Prepare for KV
+
           output_json='{}'
           for file in bot-ip-lists/*.json; do
             key_name=$(basename "$file" .json)
             json_content=$(jq -c . "$file")
-            output_json=$(echo "$output_json" | jq --arg key "$key_name" --argjson value "$json_content" '. + {($key): $value}')
+            output_json=$(echo "$output_json" \
+              | jq --arg key "$key_name" --argjson value "$json_content" \
+                  '. + {($key): $value}')
           done
           echo "$output_json" > final-bot-cidrs.json
 
       - name: Put IP CIDRs into KV
         run: |
-          npx wrangler kv:key put "BOT_CIDRS" --namespace-id=${{ secrets.KV_NAMESPACE_ID }} --path=final-bot-cidrs.json
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          npx wrangler kv key put BOT_CIDRS \
+            --binding=BOT_BLOCKER_KV \
+            --path=final-bot-cidrs.json \
+            --remote
 
-      # --- Job 2: Update Bad Bot Dictionary and save to R2 ---
+      # --- Job 2: bad-bots.txt を R2 にアップロード ---
       - name: Fetch and Upload Bad Bot Dictionary to R2
         run: |
-          # bad-bots.txtをダウンロード
-          curl -s https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker/master/bad-bots.txt -o bad-bots.txt
-          echo "Fetched bad bot dictionary."
-          # R2に辞書としてアップロード (コマンドを修正)
-          npx wrangler r2 object put rocaniiru-log/dictionaries/bad-bots.txt --file=bad-bots.txt
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          curl -s \
+            https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker/master/bad-bots.txt \
+            -o bad-bots.txt
+          npx wrangler r2 object put \
+            --bucket=rocaniiru-log \
+            --key=dictionaries/bad-bots.txt \
+            --file=bad-bots.txt \
+            --remote
