@@ -8,29 +8,28 @@ compatibility_date = "2025-07-18"
 
 # Cron Triggers
 [triggers]
-crons = ["*/30 * * * *"] # 30分ごとに実行
+crons = ["*/30 * * * *"]
 
 # KV 名前空間
 [[kv_namespaces]]
 binding = "BOT_BLOCKER_KV"
 id = "7da99382fc3945bd87bc65f55c9ea1fb"
 
-[[kv_namespaces]]
-binding = "LOCALE_FANOUT"
-id = "c77b138ecd824f499abea59e20c70ad4"
+# 不要になった LOCALE_FANOUT の定義を削除
 
 # R2 バケット
 [[r2_buckets]]
 binding = "BLOCKLIST_R2"
 bucket_name = "rocaniiru-log"
 
-# Durable Object
+# Durable Object (名前とクラス名を変更)
 [durable_objects]
 bindings = [
-  { name = "IP_COUNTER", class_name = "IPBlockCounter" }
+  { name = "IP_STATE_TRACKER", class_name = "IPStateTracker" }
 ]
 
-# Migration
+# Migration (v2に更新)
 [[migrations]]
-tag = "v1" # 2回目以降は "v2", "v3" のように変更
-new_classes = ["IPBlockCounter"] # new_sqlite_classes は非推奨になりました
+tag = "v2"
+deleted_classes = ["IPBlockCounter"] # 古いクラスを削除
+new_classes = ["IPStateTracker"]     # 新しいクラスを作成
