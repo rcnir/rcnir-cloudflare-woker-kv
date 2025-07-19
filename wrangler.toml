@@ -31,5 +31,5 @@ bindings = [
 # Migration (v2に更新)
 [[migrations]]
 tag = "v2"
-deleted_classes = ["IPBlockCounter"] # 古いクラスを削除
-new_classes = ["IPStateTracker"]     # 新しいクラスを作成
+deleted_classes = ["IPBlockCounter"] 
+new_sqlite_classes = ["IPStateTracker"] # 変更点： new_classes -> new_sqlite_classes
