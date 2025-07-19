@@ -26,22 +26,22 @@
  * =================================================================
  *
  * H判定（人間）のログをリアルタイム表示:
- * npx wrangler tail --format=pretty | grep "[H]"
+ * npx wrangler tail shopify-bot-blocker --format=pretty | grep "[H]"
  *
  * B判定（ボット）のログをリアルタイム表示:
- * npx wrangler tail --format=pretty | grep "[B]"
+ * npx wrangler tail shopify-bot-blocker --format=pretty | grep "[B]"
  *
  * 違反が検知されたログだけを表示:
- * npx wrangler tail --format=pretty | grep "[VIOLATION]"
+ * npx wrangler tail shopify-bot-blocker --format=pretty | grep "[VIOLATION]"
  *
  * KVの情報に基づいてブロックしたログだけを表示:
- * npx wrangler tail --format=pretty | grep "[KV BLOCK]"
+ * npx wrangler tail shopify-bot-blocker --format=pretty | grep "[KV BLOCK]"
  *
  * 特定IPのブロック状態を確認 (例: 192.0.2.1):
- * npx wrangler kv:key get --binding=BOT_BLOCKER_KV "192.0.2.1"
+ * npx wrangler kv:key get --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb" "192.0.2.1"
  *
- * 永続ブロックされたIPの全ログをR2から一覧表示:
- * npx wrangler r2 object list BLOCKLIST_R2
+ * 永続ブロックされたIPの全ログをR2で一覧表示:
+ * npx wrangler r2 object list rocaniiru-log
  *
  * =================================================================
  */
