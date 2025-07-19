@@ -34,4 +34,4 @@ bindings = [
 # Migration
 [[migrations]]
 tag = "v1" # 2回目以降は "v2", "v3" のように変更
-new_classes = ["IPBlockCounter"] # new_sqlite_classes は非推奨になりました
+new_classes = ["IPBlockCounter"] # new_sqlite_classes は非推奨になりましたよ
