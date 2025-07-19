@@ -20,6 +20,33 @@
  * =================================================================
  */
 
+/*
+ * =================================================================
+ * 便利なコマンド (Useful Commands)
+ * =================================================================
+ *
+ * H判定（人間）のログをリアルタイム表示:
+ * npx wrangler tail --format=pretty | grep "[H]"
+ *
+ * B判定（ボット）のログをリアルタイム表示:
+ * npx wrangler tail --format=pretty | grep "[B]"
+ *
+ * 違反が検知されたログだけを表示:
+ * npx wrangler tail --format=pretty | grep "[VIOLATION]"
+ *
+ * KVの情報に基づいてブロックしたログだけを表示:
+ * npx wrangler tail --format=pretty | grep "[KV BLOCK]"
+ *
+ * 特定IPのブロック状態を確認 (例: 192.0.2.1):
+ * npx wrangler kv:key get --binding=BOT_BLOCKER_KV "192.0.2.1"
+ *
+ * 永続ブロックされたIPの全ログをR2から一覧表示:
+ * npx wrangler r2 object list BLOCKLIST_R2
+ *
+ * =================================================================
+ */
+
+
 // --- 1. エクスポートとメインハンドラ ---
 
 import { IPBlockCounter } from "./do/IPBlockCounter.js";
