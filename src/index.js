@@ -1,11 +1,11 @@
 export default {
   async fetch(request, env, ctx) {
-    // handle関数を呼び出し、envオブジェクトを渡す
-    return handle(request, env);
+    // handle関数にenvとctxを渡す
+    return handle(request, env, ctx);
   }
 };
 
-async function handle(request, env) {
+async function handle(request, env, ctx) {
   const ua = request.headers.get('User-Agent') || 'UA_NOT_FOUND';
   const ip = request.headers.get('CF-Connecting-IP') || 'IP_NOT_FOUND';
   const { pathname } = new URL(request.url);
@@ -28,17 +28,18 @@ async function handle(request, env) {
 
   let label;
   if (servicePattern.test(ua)) {
-    label = '[S]'; // Service
+    label = '[S]';
   } else if (botPattern.test(ua)) {
-    label = '[B]'; // Bot
+    label = '[B]';
   } else {
-    label = '[H]'; // Human
+    label = '[H]';
   }
   console.log(`${label} ${request.url} IP=${ip} UA=${ua}`);
   
   // 4. ロケールファンアウトチェック (H判定のみ)
   if (label === '[H]') {
-    const fanout = await localeFanoutCheck(ip, locale, env);
+    // ctxを渡してwaitUntilを使えるようにする
+    const fanout = await localeFanoutCheck(ip, locale, ua, env, ctx);
     if (!fanout.allow) {
       console.log(`[LF-BLOCK] ${request.url} IP=${ip} UA=${ua} reason=${fanout.reason||'locale-fanout'}`);
       return new Response('Not Found', { status: 404 });
@@ -65,7 +66,6 @@ async function handle(request, env) {
 
 /* ---- ユーティリティ ---- */
 
-// ロケール抽出: /en-us/xxx → en-us、/products → root
 function extractLocale(path) {
   const seg = path.split('/').filter(Boolean)[0];
   if (!seg) return 'root';
@@ -73,14 +73,8 @@ function extractLocale(path) {
   return 'root';
 }
 
-/**
- * IPアドレス（v4/v6）をBigIntに変換します。
- * @param {string} ip - IPアドレス
- * @returns {BigInt}
- */
 function ipToBigInt(ip) {
   if (ip.includes(':')) {
-    // IPv6
     const parts = ip.split('::');
     let part1 = [], part2 = [];
     if (parts.length > 1) {
@@ -91,40 +85,22 @@ function ipToBigInt(ip) {
     }
     const zeroGroups = 8 - (part1.length + part2.length);
     const fullIp = [...part1, ...Array(zeroGroups).fill('0'), ...part2];
-    
-    return fullIp.reduce((acc, part) => {
-      const value = part ? BigInt(`0x${part}`) : 0n;
-      return (acc << 16n) + value;
-    }, 0n);
+    return fullIp.reduce((acc, part) => (acc << 16n) + (part ? BigInt(`0x${part}`) : 0n), 0n);
   } else {
-    // IPv4
     return ip.split('.').reduce((acc, part) => (acc << 8n) + BigInt(part), 0n);
   }
 }
 
-/**
- * IPアドレスがCIDR範囲内にあるかチェックします（IPv4/IPv6対応）。
- * @param {string} ip - チェックするIPアドレス
- * @param {string} cidr - CIDR範囲
- * @returns {boolean}
- */
 function ipInCidr(ip, cidr) {
   try {
     const isIPv6 = cidr.includes(':');
     const totalBits = isIPv6 ? 128 : 32;
-    
     const [base, bitsStr] = cidr.split('/');
     const prefix = parseInt(bitsStr, 10);
-    
-    if (isNaN(prefix) || prefix < 0 || prefix > totalBits) {
-      return false;
-    }
-
+    if (isNaN(prefix) || prefix < 0 || prefix > totalBits) return false;
     const ipBigInt = ipToBigInt(ip);
     const baseBigInt = ipToBigInt(base);
-    
-    const mask = ( (1n << BigInt(prefix)) - 1n ) << BigInt(totalBits - prefix);
-    
+    const mask = ((1n << BigInt(prefix)) - 1n) << BigInt(totalBits - prefix);
     return (ipBigInt & mask) === (baseBigInt & mask);
   } catch (e) {
     console.error(`[ipInCidr] Error: ip='${ip}' cidr='${cidr}'`, e);
@@ -132,17 +108,17 @@ function ipInCidr(ip, cidr) {
   }
 }
 
-// ====== ロケールファンアウト KV ======
-const LOCALE_WINDOW = 30 * 1000;      // 30秒
-const LOCALE_THRESHOLD = 3;           // 3ロケール以上
-const BLOCK_DURATION = 24 * 3600 * 1000; // 24時間
+const LOCALE_WINDOW = 30 * 1000;
+const LOCALE_THRESHOLD = 3;
 
-async function localeFanoutCheck(ip, locale, env) {
+// ★★★ここからが変更ブロック★★★
+async function localeFanoutCheck(ip, locale, ua, env, ctx) {
   if (!ip) return { allow: true };
 
   const now = Date.now();
   const raw = await env.LOCALE_FANOUT.get(ip);
-  let data = raw ? JSON.parse(raw) : { locales: {}, blockedUntil: 0 };
+  // offenseCountを追加
+  let data = raw ? JSON.parse(raw) : { locales: {}, blockedUntil: 0, offenseCount: 0 };
   
   let needsWrite = false;
 
@@ -165,13 +141,32 @@ async function localeFanoutCheck(ip, locale, env) {
 
   const fanout = Object.keys(data.locales).length;
   if (fanout >= LOCALE_THRESHOLD) {
-    data.blockedUntil = now + BLOCK_DURATION;
+    // 違反回数をインクリメント
+    data.offenseCount = (data.offenseCount || 0) + 1;
+    
+    // 違反回数に応じてブロック期間を決定
+    const isRepeatOffender = data.offenseCount > 1;
+    const blockDuration = isRepeatOffender ? (24 * 3600 * 1000) : (10 * 60 * 1000); // 再犯なら24h、初回なら10m
+    const reason = `locale-fanout(${fanout})${isRepeatOffender ? '-repeat' : ''}`;
+    
+    data.blockedUntil = now + blockDuration;
     needsWrite = true;
     
-    if(needsWrite) {
+    // ブロックログをKVに保存
+    const logKey = `blocked_ip:${ip}`;
+    const logValue = JSON.stringify({
+      timestamp: new Date(now).toISOString(),
+      reason: reason,
+      offenseCount: data.offenseCount,
+      userAgent: ua,
+    });
+    const thirtyDays = 30 * 24 * 3600;
+    ctx.waitUntil(env.LOCALE_FANOUT.put(logKey, logValue, { expirationTtl: thirtyDays }));
+    
+    if (needsWrite) {
       await env.LOCALE_FANOUT.put(ip, JSON.stringify(data), { expirationTtl: 2 * 24 * 3600 });
     }
-    return { allow: false, reason: `locale-fanout(${fanout})` };
+    return { allow: false, reason: reason };
   }
   
   if (needsWrite) {
@@ -180,3 +175,4 @@ async function localeFanoutCheck(ip, locale, env) {
 
   return { allow: true };
 }
+// ★★★ここまで★★★
