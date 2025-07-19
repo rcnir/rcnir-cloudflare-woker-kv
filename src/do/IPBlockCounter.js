@@ -1,20 +1,18 @@
+// src/do/IPBlockCounter.js
 export class IPBlockCounter {
-  constructor(state, env) {
-    this.state = state;
+  constructor(ctx, env) {
+    this.state = ctx.storage;
     this.env = env;
   }
 
   async fetch(request) {
-    const url = new URL(request.url);
-    const ip = url.searchParams.get("ip");
-    if (!ip) return new Response("Missing IP", { status: 400 });
-
-    const stored = await this.state.storage.get(ip) || 0;
-    const newCount = stored + 1;
-    await this.state.storage.put(ip, newCount);
-
-    return new Response(JSON.stringify({ ip, count: newCount }), {
-      headers: { "Content-Type": "application/json" },
-    });
+    const { ip } = await request.json();
+    const current = (await this.state.get(ip)) || 0;
+    const next = current + 1;
+    await this.state.put(ip, next);
+    return new Response(
+      JSON.stringify({ ip, count: next }),
+      { headers: { "Content-Type": "application/json" } }
+    );
   }
 }
