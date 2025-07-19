@@ -182,11 +182,10 @@ async function handle(request, env, ctx) {
 
   // [H]人間の異常行動検知
   if (label === "[H]") {
-    const locale = extractLocale(path);
     const res = await stub.fetch(new Request("https://internal/check-locale", {
-        method: 'POST',
-        headers: { "CF-Connecting-IP": ip, "Content-Type": "application/json" },
-        body: JSON.stringify({ locale })
+      method: 'POST',
+      headers: { "CF-Connecting-IP": ip, "Content-Type": "application/json" },
+      body: JSON.stringify({ path })  // ← path をそのまま送る
     }));
     if (res.ok) {
         const { violation, count } = await res.json();
