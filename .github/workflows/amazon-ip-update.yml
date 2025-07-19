@@ -1,4 +1,5 @@
-name: Update AMAZON_IPS daily
+name: Update AMAZON_IPS daily (wrangler-action)
+
 on:
   workflow_dispatch:
   schedule:
@@ -8,16 +9,18 @@ jobs:
   update-kv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
       - name: Fetch Amazon IP ranges
         run: |
           curl -s https://ip-ranges.amazonaws.com/ip-ranges.json \
-          | jq '[ .prefixes[] | select(.service=="AMAZON") | .ip_prefix ]' > amazon-ips.json
+            | jq '[.prefixes[] | select(.service=="AMAZON") | .ip_prefix]' \
+            > amazon-ips.json
 
-      - name: Put AMAZON_IPS into KV
+      - name: Put AMAZON_IPS into KV via wrangler-action
         uses: cloudflare/wrangler-action@v3
         with:
-          apiToken:  ${{ secrets.CF_API_TOKEN }}
+          apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: wrangler kv key put AMAZON_IPS --path=amazon-ips.json --binding=BOT_BLOCKER_KV --config=wrangler.toml --verbose
+          command: kv key put AMAZON_IPS --binding=BOT_BLOCKER_KV --path=amazon-ips.json --verbose
