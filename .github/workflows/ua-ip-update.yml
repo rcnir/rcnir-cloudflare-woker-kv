@@ -1,0 +1,64 @@
+# .github/workflows/ua-ip-update.yml
+name: Update Bot CIDR Lists in KV
+
+on:
+  workflow_dispatch: # 手動実行
+  schedule:
+    - cron: '0 18 * * *' # 毎日 18:00 UTC (日本時間 午前3時) に実行
+
+jobs:
+  update-kv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install -g wrangler jq
+
+      # AmazonのIPレンジを取得
+      - name: Fetch Amazon IP ranges
+        run: |
+          curl -s https://ip-ranges.amazonaws.com/ip-ranges.json \
+          | jq '[.prefixes[] | select(.service=="AMAZON") | .ip_prefix]' \
+          > bot-ip-lists/amazon.json
+        # ここに将来的に他のボットのIPリストを取得するコマンドを追加できます
+        # 例: curl ... > bot-ip-lists/claude.json
+
+      # 複数のJSONファイルを1つのKV値にマージ
+      - name: Prepare KV value from multiple JSON files
+        id: prepare_kv
+        run: |
+          # 出力用JSONを初期化
+          output_json='{}'
+          
+          # bot-ip-lists ディレクトリ内の各jsonファイルに対してループ
+          for file in bot-ip-lists/*.json; do
+            # ファイル名から拡張子を除いた部分をキーとして使用 (例: 'amazon')
+            # UAと完全に一致させたい場合は、ファイル名をUAに合わせるなどの工夫が可能
+            # ここではUAに含まれるキーワードを想定し、amazon -> AmazonProductDiscovery/1.0 のようにworker側でマッピング
+            key_name=$(basename "$file" .json)
+            
+            # ファイルの内容を読み込み、jqでエスケープ
+            json_content=$(jq -c . "$file")
+            
+            # 出力用JSONにキーと値を追加
+            output_json=$(echo "$output_json" | jq --arg key "$key_name" --argjson value "$json_content" '. + {($key): $value}')
+          done
+          
+          # 結合したJSONを一時ファイルに保存
+          echo "$output_json" > final-bot-cidrs.json
+
+      - name: Put BOT_CIDRS into KV
+        run: |
+          npx wrangler kv:key put "BOT_CIDRS" \
+            --namespace-id=${{ secrets.KV_NAMESPACE_ID }} \
+            --path=final-bot-cidrs.json
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
