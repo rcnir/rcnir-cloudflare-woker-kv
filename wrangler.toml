@@ -12,13 +12,12 @@ id = "7da99382fc3945bd87bc65f55c9ea1fb"
 
 [[kv_namespaces]]
 binding = "LOCALE_FANOUT"
-id = "c77b138ecd824f499abe59e20c70ad4"
+id = "c77b138ecd824f499abea59e20c70ad4"
 
 [[r2_buckets]]
 binding = "BLOCKLIST_R2"
 bucket_name = "rocaniiru-log"
 
-# Durable Object バインディング（オブジェクトとして明示記述）
 [durable_objects]
 bindings = [
   { name = "IP_COUNTER", class_name = "IPBlockCounter" }
