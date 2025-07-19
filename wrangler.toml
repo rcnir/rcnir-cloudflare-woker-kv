@@ -30,4 +30,4 @@ bindings = [
 
 # Migration (v3に更新)
 [[migrations]]
-tag = "v3"
+tag = "v4"
