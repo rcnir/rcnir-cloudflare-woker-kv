@@ -111,13 +111,15 @@ async function handle(request, env, ctx) {
   const stub = env.IP_STATE_TRACKER.get(id);
 
   if (label === "[B]") {
-    if (unwantedBotPatternsCache === null) {
-      const patternsJson = await env.BOT_BLOCKER_KV.get("UNWANTED_BOT_UA_PATTERNS");
-      unwantedBotPatternsCache = patternsJson ? JSON.parse(patternsJson) : [];
+    // ステップ1：学習済みリスト（KV）に載っているか確認
+    if (learnedBadBotsCache === null) {
+      const learnedList = await env.BOT_BLOCKER_KV.get("LEARNED_BAD_BOTS", { type: "json" });
+      learnedBadBotsCache = new Set(Array.isArray(learnedList) ? learnedList : []);
     }
-    for (const patt of unwantedBotPatternsCache) {
+    for (const patt of learnedBadBotsCache) {
       if (new RegExp(patt, "i").test(ua)) {
-        const reason = `unwanted-bot:${patt}`;
+        // 学習済みのボットなので即ブロック
+        const reason = `unwanted-bot(learned):${patt}`;
         const res = await stub.fetch(new Request("https://internal/trigger-violation", { headers: { "CF-Connecting-IP": ip } }));
         if (res.ok) {
           const { count } = await res.json();
@@ -125,6 +127,33 @@ async function handle(request, env, ctx) {
         }
         return new Response("Not Found", { status: 404 });
       }
+    }
+
+    // ステップ2：辞書（R2）と照合して、新しい有害ボットか判断
+    if (badBotDictionaryCache === null) {
+        const object = await env.BLOCKLIST_R2.get("dictionaries/bad-bots.txt");
+        if (object !== null) {
+            const dictionaryText = await object.text();
+            badBotDictionaryCache = dictionaryText.split('\n').filter(line => line && !line.startsWith('#'));
+        } else {
+            badBotDictionaryCache = [];
+        }
+    }
+    for (const patt of badBotDictionaryCache) {
+        if (new RegExp(patt, "i").test(ua)) {
+            const reason = `unwanted-bot(new):${patt}`;
+            console.log(`[LEARNED] New bad bot pattern: ${patt}`);
+            
+            learnedBadBotsCache.add(patt);
+            ctx.waitUntil(env.BOT_BLOCKER_KV.put("LEARNED_BAD_BOTS", JSON.stringify(Array.from(learnedBadBotsCache))));
+
+            const res = await stub.fetch(new Request("https://internal/trigger-violation", { headers: { "CF-Connecting-IP": ip } }));
+            if (res.ok) {
+                const { count } = await res.json();
+                await handleViolationSideEffects(ip, ua, reason, count, env, ctx);
+            }
+            return new Response("Not Found", { status: 404 });
+        }
     }
   }
 
