@@ -52,6 +52,8 @@ async function logAndBlock(ip, ua, reason, env, ctx) {
   return new Response('Not Found', { status: 404 });
 }
 
+// KVから読み込んだブロックリストをキャッシュする変数
+let unwantedBotPatterns = null;
 // =================================================================
 // 2. メイン処理関数 (リクエストハンドラ)
 // =================================================================
@@ -61,6 +63,19 @@ async function handle(request, env, ctx) {
   const { pathname } = new URL(request.url);
   const path = pathname.toLowerCase();
 
+  // --- KVから不要ボットリストを読み込み＆キャッシュ ---
+  if (unwantedBotPatterns === null) {
+    try {
+      console.log('Fetching unwanted bot patterns from KV...');
+      const patternsJson = await env.LOCALE_FANOUT.get('UNWANTED_BOT_UA_PATTERNS');
+      unwantedBotPatterns = patternsJson ? JSON.parse(patternsJson) : [];
+      console.log(`Loaded ${unwantedBotPatterns.length} unwanted bot patterns.`);
+    } catch (e) {
+      console.error("Failed to load or parse UNWANTED_BOT_UA_PATTERNS from KV", e);
+      unwantedBotPatterns = []; // エラー時は空のリストとして処理を続行
+    }
+  }
+  
   // --- 静的ルールによるブロック ---
   const staticBlockIps = new Set([
     // 永久追放したいIPのみ、手動でここに追加
@@ -81,7 +96,6 @@ async function handle(request, env, ctx) {
                         path.includes('/dbadmin');
 
   if (isPathBlocked) {
-    // パスは長くなる可能性があるので、ブロック理由からは除外
     return logAndBlock(ip, ua, 'path-scan', env, ctx);
   }
 
@@ -107,7 +121,21 @@ async function handle(request, env, ctx) {
     label = '[H]';
   }
   console.log(`${label} ${request.url} IP=${ip} UA=${ua}`);
-  
+
+  // --- 不要なボットのブロック ---
+  if (label === '[B]' && unwantedBotPatterns.length > 0) {
+    for (const pattern of unwantedBotPatterns) {
+      try {
+        if (new RegExp(pattern, 'i').test(ua)) {
+          return logAndBlock(ip, ua, `unwanted-bot:${pattern}`, env, ctx);
+        }
+      } catch (e) {
+        // 正規表現が無効な場合に備える
+        console.error(`Invalid regex pattern in blocklist: ${pattern}`, e);
+      }
+    }
+  }
+
   // --- 動的ルールによるブロック (振る舞い検知) ---
   if (label === '[H]') {
     const fanout = await localeFanoutCheck(ip, locale, ua, env, ctx);
@@ -117,23 +145,18 @@ async function handle(request, env, ctx) {
   }
 
   // --- 特定Botへの対策 ---
-  // ★改善点: .includes() から .startsWith() へ変更
   if (ua.startsWith('AmazonProductDiscovery/1.0')) {
     const cidrs = await env.BOT_BLOCKER_KV.get('AMAZON_IPS', { type: 'json', cacheTtl: 3600 }) || [];
     if (!Array.isArray(cidrs) || cidrs.length === 0) {
       console.log('[WARN] AMAZON_IPS empty -> bypass');
-      return fetch(request);
-    }
-    if (!cidrs.some(c => ipInCidr(ip, c))) {
+    } else if (!cidrs.some(c => ipInCidr(ip, c))) {
       return logAndBlock(ip, ua, 'amazon-impersonation', env, ctx);
+    } else {
+      console.log(`[ALLOWED] AmazonBot ${request.url} IP=${ip}`);
     }
   }
 
   // すべてのチェックを通過したリクエスト
-  // amazonのチェックは偽装対策なので、ここでバイパスせずに通常の処理を続ける
-  if(ua.startsWith('AmazonProductDiscovery/1.0')){
-     console.log(`[ALLOWED] ${request.url} IP=${ip} UA=${ua}`);
-  }
   return fetch(request);
 }
 
