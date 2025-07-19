@@ -79,7 +79,7 @@ async function handle(request, env, ctx) {
   const path = pathname.toLowerCase();
 
   const status = await env.BOT_BLOCKER_KV.get(ip, { cacheTtl: 300 });
-  if (status === "permanent-block" || status === "temp-1" || status === "temp-2") {
+  if (status === "permanent-block" || status === "temp-1" || status === "temp-2" || status === "temp-3") {
     console.log(`[KV BLOCK] IP=${ip} status=${status}`);
     return new Response("Not Found", { status: 404 });
   }
@@ -196,11 +196,19 @@ async function handle(request, env, ctx) {
 
 async function handleViolationSideEffects(ip, ua, reason, count, env, ctx) {
   console.log(`[VIOLATION] IP=${ip} reason=${reason} count=${count}`);
+
   if (count === 1) {
+    // 1回目：10分ブロック
     ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-1", { expirationTtl: 600 }));
   } else if (count === 2) {
+    // 2回目：10分ブロック
     ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-2", { expirationTtl: 600 }));
-  } else if (count >= 3) {
+  } else if (count === 3) {
+    // 3回目：24時間ブロック
+    const twentyFourHours = 24 * 3600;
+    ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-3", { expirationTtl: twentyFourHours }));
+  } else if (count >= 4) {
+    // 4回目：永久ブロック
     ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "permanent-block"));
     const record = JSON.stringify({ ip, userAgent: ua, reason, count, timestamp: new Date().toISOString() });
     ctx.waitUntil(env.BLOCKLIST_R2.put(`${ip}-${Date.now()}.json`, record));
