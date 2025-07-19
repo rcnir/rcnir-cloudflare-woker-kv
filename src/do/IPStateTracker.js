@@ -4,30 +4,35 @@ export class IPStateTracker {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.LOCALE_WINDOW_MS = 30 * 1000; // 30秒
-    this.LOCALE_THRESHOLD = 3;        // 3ロケール
+    // --- 検知ルールの設定 ---
+    this.LOCALE_WINDOW_MS = 10 * 1000;      // 10秒
+    this.LOCALE_THRESHOLD = 3;              // 3ロケール
+    // --- レート制限ルールの設定 ---
+    this.RATE_LIMIT_COUNT = 10;             // 10リクエスト
+    this.RATE_LIMIT_DURATION_MS = 60 * 1000; // 1分 (60秒)
   }
 
   async fetch(request) {
     const url = new URL(request.url);
     const ip = request.headers.get("CF-Connecting-IP");
 
-    // 内部APIのルーティング
     switch (url.pathname) {
       case "/check-locale": {
         const { locale } = await request.json();
         return this.handleLocaleCheck(ip, locale);
       }
       case "/trigger-violation": {
-        // 偽装やUAパターンなど、即時違反としてカウントする場合
         return this.incrementCount(ip);
       }
+      case "/rate-limit": {
+        return this.handleRateLimit(ip);
+      }
       case "/list-high-count": {
-        // Cronからのリクエスト
         const data = await this.state.storage.list({ limit: 1000 });
         const highCountIps = [];
         for (const [ip, state] of data.entries()) {
-          if (state.count >= 3) {
+          // 4回以上の違反で永久ブロック対象
+          if (state && state.count >= 4) {
             highCountIps.push(ip);
           }
         }
@@ -40,10 +45,18 @@ export class IPStateTracker {
 
   // IPの状態を取得または初期化
   async getState(ip) {
-    const state = await this.state.storage.get(ip) || { count: 0, locales: {} };
-    // 念のため、古いデータ構造にも対応
-    if (typeof state !== 'object' || state === null) {
-      return { count: state || 0, locales: {} };
+    // ストレージから状態を取得、なければデフォルト値を設定
+    let state = await this.state.storage.get(ip) || {
+      count: 0,
+      locales: {},
+      rateLimit: { count: 0, firstRequest: 0 }
+    };
+    // 古いデータ構造からの移行を考慮
+    if (typeof state.locales === 'undefined') {
+      state.locales = {};
+    }
+    if (typeof state.rateLimit === 'undefined') {
+      state.rateLimit = { count: 0, firstRequest: 0 };
     }
     return state;
   }
@@ -66,26 +79,40 @@ export class IPStateTracker {
     const state = await this.getState(ip);
     const now = Date.now();
 
-    // 古いロケール履歴を削除
     for (const [loc, ts] of Object.entries(state.locales)) {
       if (now - ts > this.LOCALE_WINDOW_MS) {
         delete state.locales[loc];
       }
     }
 
-    // 新しいロケールを追加
     state.locales[locale] = now;
 
-    // 閾値を超えたかチェック
     if (Object.keys(state.locales).length >= this.LOCALE_THRESHOLD) {
-      state.count += 1;       // 違反カウントを増やす
-      state.locales = {};     // 違反が確定したら履歴をリセット
+      state.count += 1;
+      state.locales = {};
       await this.putState(ip, state);
       return new Response(JSON.stringify({ violation: true, count: state.count }), { headers: { "Content-Type": "application/json" } });
     }
 
-    // 違反していない場合は、現在の状態を保存するだけ
     await this.putState(ip, state);
     return new Response(JSON.stringify({ violation: false }), { headers: { "Content-Type": "application/json" } });
+  }
+
+  // レート制限を処理する関数
+  async handleRateLimit(ip) {
+    const state = await this.getState(ip);
+    const now = Date.now();
+    
+    if (now - state.rateLimit.firstRequest > this.RATE_LIMIT_DURATION_MS) {
+      state.rateLimit = { count: 1, firstRequest: now };
+    } else {
+      state.rateLimit.count++;
+    }
+    
+    await this.putState(ip, state);
+
+    const allowed = state.rateLimit.count <= this.RATE_LIMIT_COUNT;
+    
+    return new Response(JSON.stringify({ allowed }), { headers: { "Content-Type": "application/json" } });
   }
 }
