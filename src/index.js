@@ -75,6 +75,16 @@ export default {
 async function handle(request, env, ctx) {
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
+
+  // --- Cookieベースのホワイトリスト設定 ---
+  const cookieHeader = request.headers.get("Cookie") || "";
+  // "secret-pass=YOUR_SECRET_PHRASE" のようなCookieを探す
+  if (cookieHeader.includes("secret-pass=Rocaniru-Admin-Bypass-XYZ789")) {
+    console.log(`[WHITELIST] Access granted via secret cookie for IP=${ip}.`);
+    return fetch(request); // 全てのチェックをスキップ
+  }
+  // --- ここまでが新しいホワイトリストロジック ---
+  
   const { pathname } = new URL(request.url);
   const path = pathname.toLowerCase();
 
