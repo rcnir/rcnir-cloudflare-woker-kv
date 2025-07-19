@@ -3,7 +3,9 @@ account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
 compatibility_date = "2025-07-18"
 # optional: usage_model = "bundled"
-# optional: workers_dev = true
+
+workers_dev = true     # ← テスト用
+routes = []            # ← テスト用
 
 # Bot 判定用 CIDR リスト
 [[kv_namespaces]]
