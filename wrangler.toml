@@ -15,19 +15,21 @@ id = "7da99382fc3945bd87bc65f55c9ea1fb"
 binding = "LOCALE_FANOUT"
 id = "c77b138ecd824f499abea59e20c70ad4"  # 取得した ID に置換
 
-# R2バスケット
+# R2 バケット
 [[r2_buckets]]
-binding = "BLOCKLIST_R2"         # コード内で使う識別子
-bucket_name = "rocaniiru-log"    # ダッシュボードで作成したバケット名
+binding = "BLOCKLIST_R2"
+bucket_name = "rocaniiru-log"
 
-# Durable Object
+# Durable Object 登録
 [[durable_objects]]
 name = "IPBlockCounter"
 class_name = "IPBlockCounter"
 
+# Migration（初回バージョン）
 [[migrations]]
-tag = "v1" # 任意のバージョン名
-new_classes = ["IPBlockCounter"]
+tag = "v1"
+new_sqlite_classes = ["IPBlockCounter"]
 
+# DO バインディング
 [durable_objects.bindings]
 IP_COUNTER = "IPBlockCounter"
