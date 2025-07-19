@@ -79,7 +79,7 @@ async function handle(request, env, ctx) {
   const cookieHeader = request.headers.get("Cookie") || "";
   if (cookieHeader.includes("secret-pass=Rocaniru-Admin-Bypass-XYZ789")) {
     console.log(`[WHITELIST] Access granted via secret cookie for IP=${ip}.`);
-    return fetch(request); // 全てのチェックをスキップ
+    return fetch(request);
   }
 
   const { pathname } = new URL(request.url);
@@ -93,12 +93,6 @@ async function handle(request, env, ctx) {
   }
 
   // --- 3. 静的ルールによるブロック ---
-  const staticBlockIps = new Set([]);
-  for (const block of staticBlockIps) {
-    if (ipInCidr(ip, block)) {
-      return logAndBlock(ip, ua, "static-ip", env, ctx);
-    }
-  }
   if (path.includes("/wp-") || path.endsWith(".php") || path.includes("/phpmyadmin") ||
       path.endsWith("/.env") || path.endsWith("/config") || path.includes("/admin/") ||
       path.includes("/dbadmin")) {
@@ -107,37 +101,43 @@ async function handle(request, env, ctx) {
 
   // --- 4. アセットファイルのスキップ ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
-  const PATH_SKIP = path.startsWith("/wpm@") || path.includes("/cart.js") ||
-                    path.includes("/recommendations/") || path.startsWith("/_t/");
-  if (EXT_SKIP.test(path) || PATH_SKIP) {
+  if (EXT_SKIP.test(path)) {
     return fetch(request);
   }
 
-  // --- 5. ログ用の分類と、PetalBotの特別処理 ---
+  // --- 5. ログ用の分類と、安全なボットのレート制限 ---
   const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
   const label = botPattern.test(ua) ? "[B]" : "[H]";
   console.log(`${label} ${request.url} IP=${ip} UA=${ua}`);
 
-  // PetalBotは特別にレート制限を行う
-  if (ua.includes("PetalBot")) {
-    const id = env.IP_STATE_TRACKER.idFromName(ip);
-    const stub = env.IP_STATE_TRACKER.get(id);
-    const res = await stub.fetch(new Request("https://internal/rate-limit", { headers: { "CF-Connecting-IP": ip } }));
-    if(res.ok) {
+  // レート制限をかけたい「安全なボット」のリスト
+  const safeBotPatterns = [
+    "PetalBot",
+    // 他にレート制限したいボットがあれば、将来ここにカンマ区切りで追加
+  ];
+
+  for (const safeBotPattern of safeBotPatterns) {
+    if (ua.includes(safeBotPattern)) {
+      const id = env.IP_STATE_TRACKER.idFromName(ip);
+      const stub = env.IP_STATE_TRACKER.get(id);
+      const res = await stub.fetch(new Request("https://internal/rate-limit", { headers: { "CF-Connecting-IP": ip } }));
+      if (res.ok) {
         const { allowed } = await res.json();
         if (!allowed) {
-            console.log(`[RATE LIMIT] PetalBot IP=${ip} blocked.`);
-            return new Response("Too Many Requests", { status: 429 });
+          console.log(`[RATE LIMIT] SafeBot (${safeBotPattern}) IP=${ip} blocked.`);
+          return new Response("Too Many Requests", { status: 429 });
         }
+      }
+      // レート制限内で許可された場合は、ここで処理を終了
+      return fetch(request);
     }
-    return fetch(request); // 制限内で許可された場合は、ここで処理を終了
   }
-  
+
   // --- 6. 各種動的ルールの適用 ---
   const id = env.IP_STATE_TRACKER.idFromName(ip);
   const stub = env.IP_STATE_TRACKER.get(id);
 
-  // [B]ボットの学習とブロック (PetalBotは除外)
+  // 有害ボット([B])の学習とブロック
   if (label === "[B]") {
     // ステップ1：学習済みリスト（KV）に載っているか確認
     if (learnedBadBotsCache === null) {
