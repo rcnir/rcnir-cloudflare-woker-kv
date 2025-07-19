@@ -1,10 +1,15 @@
+# wrangler.toml
 name = "shopify-bot-blocker"
 account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
 compatibility_date = "2025-07-18"
 
-workers_dev = true     # テスト用
-routes = []            # テスト用
+workers_dev = true
+# routes = [] # 本番デプロイ時には設定してください
+
+# Cron Triggers
+[triggers]
+crons = ["*/30 * * * *"] # 30分ごとに実行
 
 # KV 名前空間
 [[kv_namespaces]]
@@ -26,7 +31,7 @@ bindings = [
   { name = "IP_COUNTER", class_name = "IPBlockCounter" }
 ]
 
-# Migration（初回）
+# Migration
 [[migrations]]
-tag = "v1"
-new_sqlite_classes = ["IPBlockCounter"]
+tag = "v1" # 2回目以降は "v2", "v3" のように変更
+new_classes = ["IPBlockCounter"] # new_sqlite_classes は非推奨になりました
