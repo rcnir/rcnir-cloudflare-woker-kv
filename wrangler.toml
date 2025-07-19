@@ -2,17 +2,34 @@ name = "shopify-bot-blocker"
 account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
 compatibility_date = "2025-07-18"
-# optional: usage_model = "bundled"
 
 workers_dev = true     # ← テスト用
 routes = []            # ← テスト用
 
-# Bot 判定用 CIDR リスト
+# KV 名前空間
 [[kv_namespaces]]
 binding = "BOT_BLOCKER_KV"
 id = "7da99382fc3945bd87bc65f55c9ea1fb"
 
-# ロケールファンアウト制御用
 [[kv_namespaces]]
 binding = "LOCALE_FANOUT"
 id = "c77b138ecd824f499abea59e20c70ad4"
+
+# R2 バケット
+[[r2_buckets]]
+binding = "BLOCKLIST_R2"
+bucket_name = "rocaniiru-log"
+
+# Durable Object 登録
+[[durable_objects]]
+name = "IPBlockCounter"
+class_name = "IPBlockCounter"
+
+# Migration（初回バージョン）
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["IPBlockCounter"]
+
+# DO バインディング
+[durable_objects.bindings]
+IP_COUNTER = "IPBlockCounter"
