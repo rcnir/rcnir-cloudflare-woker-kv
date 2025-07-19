@@ -26,6 +26,10 @@
  * =================================================================
  */
 
+// --- Durable Object クラスをエントリポイントで再エクスポート ---
+import { IPBlockCounter } from "./do/IPBlockCounter.js";
+export { IPBlockCounter };
+
 export default {
   async fetch(request, env, ctx) {
     return handle(request, env, ctx);
