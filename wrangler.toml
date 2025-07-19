@@ -3,31 +3,27 @@ account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
 compatibility_date = "2025-07-18"
 
-workers_dev = true     # テスト用
-routes = []            # テスト用
+workers_dev = true
+routes = []
 
-# KV 名前空間
 [[kv_namespaces]]
 binding = "BOT_BLOCKER_KV"
 id = "7da99382fc3945bd87bc65f55c9ea1fb"
 
 [[kv_namespaces]]
 binding = "LOCALE_FANOUT"
-id = "c77b138ecd824f499abea59e20c70ad4"
+id = "c77b138ecd824f499abe59e20c70ad4"
 
-# R2 バケット
 [[r2_buckets]]
 binding = "BLOCKLIST_R2"
 bucket_name = "rocaniiru-log"
 
-# Durable Object バインディング（オブジェクト形式）
-durable_objects = { 
-  bindings = [
-    { name = "IP_COUNTER", class_name = "IPBlockCounter" }
-  ]
-}
+# Durable Object バインディング（オブジェクトとして明示記述）
+[durable_objects]
+bindings = [
+  { name = "IP_COUNTER", class_name = "IPBlockCounter" }
+]
 
-# Migration（初回バージョン）
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["IPBlockCounter"]
