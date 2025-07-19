@@ -20,7 +20,7 @@ id = "c77b138ecd824f499abea59e20c70ad4"  # 取得した ID に置換
 binding = "BLOCKLIST_R2"         # コード内で使う識別子
 bucket_name = "rocaniiru-log"    # ダッシュボードで作成したバケット名
 
-
+# Durable Object
 [[durable_objects]]
 name = "IPBlockCounter"
 class_name = "IPBlockCounter"
