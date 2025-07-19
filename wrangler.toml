@@ -3,8 +3,8 @@ account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
 compatibility_date = "2025-07-18"
 
-workers_dev = true     # ← テスト用
-routes = []            # ← テスト用
+workers_dev = true     # テスト用
+routes = []            # テスト用
 
 # KV 名前空間
 [[kv_namespaces]]
@@ -20,16 +20,14 @@ id = "c77b138ecd824f499abea59e20c70ad4"
 binding = "BLOCKLIST_R2"
 bucket_name = "rocaniiru-log"
 
-# Durable Object 登録
-[[durable_objects]]
-name = "IPBlockCounter"
-class_name = "IPBlockCounter"
+# Durable Object バインディング（オブジェクト形式）
+durable_objects = { 
+  bindings = [
+    { name = "IP_COUNTER", class_name = "IPBlockCounter" }
+  ]
+}
 
 # Migration（初回バージョン）
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["IPBlockCounter"]
-
-# DO バインディング
-[durable_objects.bindings]
-IP_COUNTER = "IPBlockCounter"
