@@ -1,0 +1,30 @@
+name: Update AMAZON_IPS daily (wrangler CLI)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
+
+jobs:
+  update-kv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install Wrangler globally
+        run: npm install -g wrangler
+
+      - name: Fetch Amazon IP ranges
+        run: |
+          curl -s https://ip-ranges.amazonaws.com/ip-ranges.json \
+            | jq '[.prefixes[] | select(.service=="AMAZON") | .ip_prefix]' \
+            > amazon-ips.json
+
+      - name: Put AMAZON_IPS into KV via CLI
+        run: |
+          wrangler kv key put AMAZON_IPS --binding=BOT_BLOCKER_KV \
+            --path=amazon-ips.json --verbose
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
