@@ -71,29 +71,28 @@ export default {
 
 
 // --- 2. メインロジック ---
-
 async function handle(request, env, ctx) {
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
 
-  // --- Cookieベースのホワイトリスト設定 ---
+  // --- 1. Cookieベースのホワイトリストチェック (最優先) ---
   const cookieHeader = request.headers.get("Cookie") || "";
-  // "secret-pass=YOUR_SECRET_PHRASE" のようなCookieを探す
   if (cookieHeader.includes("secret-pass=Rocaniru-Admin-Bypass-XYZ789")) {
     console.log(`[WHITELIST] Access granted via secret cookie for IP=${ip}.`);
     return fetch(request); // 全てのチェックをスキップ
   }
-  // --- ここまでが新しいホワイトリストロジック ---
-  
+
   const { pathname } = new URL(request.url);
   const path = pathname.toLowerCase();
 
+  // --- 2. KVブロックリストチェック ---
   const status = await env.BOT_BLOCKER_KV.get(ip, { cacheTtl: 300 });
   if (status === "permanent-block" || status === "temp-1" || status === "temp-2" || status === "temp-3") {
     console.log(`[KV BLOCK] IP=${ip} status=${status}`);
     return new Response("Not Found", { status: 404 });
   }
 
+  // --- 3. 静的ルールによるブロック ---
   const staticBlockIps = new Set([]);
   for (const block of staticBlockIps) {
     if (ipInCidr(ip, block)) {
@@ -106,6 +105,7 @@ async function handle(request, env, ctx) {
     return logAndBlock(ip, ua, "path-scan", env, ctx);
   }
 
+  // --- 4. アセットファイルのスキップ ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
   const PATH_SKIP = path.startsWith("/wpm@") || path.includes("/cart.js") ||
                     path.includes("/recommendations/") || path.startsWith("/_t/");
@@ -113,13 +113,31 @@ async function handle(request, env, ctx) {
     return fetch(request);
   }
 
+  // --- 5. ログ用の分類と、PetalBotの特別処理 ---
   const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
   const label = botPattern.test(ua) ? "[B]" : "[H]";
   console.log(`${label} ${request.url} IP=${ip} UA=${ua}`);
 
+  // PetalBotは特別にレート制限を行う
+  if (ua.includes("PetalBot")) {
+    const id = env.IP_STATE_TRACKER.idFromName(ip);
+    const stub = env.IP_STATE_TRACKER.get(id);
+    const res = await stub.fetch(new Request("https://internal/rate-limit", { headers: { "CF-Connecting-IP": ip } }));
+    if(res.ok) {
+        const { allowed } = await res.json();
+        if (!allowed) {
+            console.log(`[RATE LIMIT] PetalBot IP=${ip} blocked.`);
+            return new Response("Too Many Requests", { status: 429 });
+        }
+    }
+    return fetch(request); // 制限内で許可された場合は、ここで処理を終了
+  }
+  
+  // --- 6. 各種動的ルールの適用 ---
   const id = env.IP_STATE_TRACKER.idFromName(ip);
   const stub = env.IP_STATE_TRACKER.get(id);
 
+  // [B]ボットの学習とブロック (PetalBotは除外)
   if (label === "[B]") {
     // ステップ1：学習済みリスト（KV）に載っているか確認
     if (learnedBadBotsCache === null) {
@@ -128,7 +146,6 @@ async function handle(request, env, ctx) {
     }
     for (const patt of learnedBadBotsCache) {
       if (new RegExp(patt, "i").test(ua)) {
-        // 学習済みのボットなので即ブロック
         const reason = `unwanted-bot(learned):${patt}`;
         const res = await stub.fetch(new Request("https://internal/trigger-violation", { headers: { "CF-Connecting-IP": ip } }));
         if (res.ok) {
@@ -145,18 +162,14 @@ async function handle(request, env, ctx) {
         if (object !== null) {
             const dictionaryText = await object.text();
             badBotDictionaryCache = dictionaryText.split('\n').filter(line => line && !line.startsWith('#'));
-        } else {
-            badBotDictionaryCache = [];
-        }
+        } else { badBotDictionaryCache = []; }
     }
     for (const patt of badBotDictionaryCache) {
         if (new RegExp(patt, "i").test(ua)) {
             const reason = `unwanted-bot(new):${patt}`;
             console.log(`[LEARNED] New bad bot pattern: ${patt}`);
-            
             learnedBadBotsCache.add(patt);
             ctx.waitUntil(env.BOT_BLOCKER_KV.put("LEARNED_BAD_BOTS", JSON.stringify(Array.from(learnedBadBotsCache))));
-
             const res = await stub.fetch(new Request("https://internal/trigger-violation", { headers: { "CF-Connecting-IP": ip } }));
             if (res.ok) {
                 const { count } = await res.json();
@@ -167,6 +180,7 @@ async function handle(request, env, ctx) {
     }
   }
 
+  // [H]人間の異常行動検知
   if (label === "[H]") {
     const locale = extractLocale(path);
     const res = await stub.fetch(new Request("https://internal/check-locale", {
@@ -185,6 +199,7 @@ async function handle(request, env, ctx) {
     }
   }
 
+  // Amazonボットの偽装チェック
   if (ua.startsWith("AmazonProductDiscovery/1.0")) {
     const isVerified = await verifyBotIp(ip, "amazon", env);
     if (!isVerified) {
@@ -198,6 +213,7 @@ async function handle(request, env, ctx) {
     }
   }
   
+  // --- 7. 全てのチェックを通過 ---
   return fetch(request);
 }
 
