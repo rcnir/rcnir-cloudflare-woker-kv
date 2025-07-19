@@ -28,8 +28,6 @@ bindings = [
   { name = "IP_STATE_TRACKER", class_name = "IPStateTracker" }
 ]
 
-# Migration (v2に更新)
+# Migration (v3に更新)
 [[migrations]]
-tag = "v2"
-deleted_classes = ["IPBlockCounter"] 
-new_sqlite_classes = ["IPStateTracker"] # 変更点： new_classes -> new_sqlite_classes
+tag = "v3"
