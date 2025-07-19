@@ -103,46 +103,42 @@ export class IPStateTracker {
    * 5. handleLocaleCheck: ロケールファンアウト検出（新ロジック）
    * =================================================================
    */
-  async handleLocaleCheck(ip, path) {
-    const state = await this.getState(ip);
-    const now = Date.now();
+async handleLocaleCheck(ip, path) {
+  const state = await this.getState(ip);
+  const now = Date.now();
 
-    const { lang, country } = parseLocale(path);
+  const { lang, country } = parseLocale(path);
 
-    // 過去10秒超の記録を削除
-    for (const [key, ts] of Object.entries(state.lgRegions)) {
-      if (now - ts > this.LOCALE_WINDOW_MS) {
-        delete state.lgRegions[key];
-      }
+  // 古い記録を掃除
+  for (const [key, ts] of Object.entries(state.lgRegions)) {
+    if (now - ts > this.LOCALE_WINDOW_MS) {
+      delete state.lgRegions[key];
     }
+  }
 
-    const key = `${lang}-${country}`;
-    state.lgRegions[key] = now;
+  state.lgRegions[`${lang}-${country}`] = now;
 
-    const langs = new Set();
-    const countries = new Set();
-    for (const k of Object.keys(state.lgRegions)) {
-      const [l, c] = k.split("-");
-      langs.add(l);
-      countries.add(c);
-    }
+  // 国セットのサイズをチェック
+  const countries = new Set(
+    Object.keys(state.lgRegions).map(k => k.split("-")[1])
+  );
 
-    const violation = langs.size >= 2 && countries.size >= 2;
+  const violation = countries.size >= 2;
 
-    if (violation) {
-      state.count += 1;
-      state.lgRegions = {}; // 初期化して再検出へ
-      await this.putState(ip, state);
-      return new Response(JSON.stringify({ violation: true, count: state.count }), {
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-
+  if (violation) {
+    state.count += 1;
+    state.lgRegions = {};
     await this.putState(ip, state);
-    return new Response(JSON.stringify({ violation: false }), {
+    return new Response(JSON.stringify({ violation: true, count: state.count }), {
       headers: { "Content-Type": "application/json" }
     });
   }
+
+  await this.putState(ip, state);
+  return new Response(JSON.stringify({ violation: false }), {
+    headers: { "Content-Type": "application/json" }
+  });
+}
 
   /*
    * =================================================================
