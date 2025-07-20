@@ -22,14 +22,15 @@ let badBotDictionaryCache = null;
 
 export default {
   async fetch(request, env, ctx) {
-    // ★ 変更: リクエストごとのログを保持するバッファを初期化
     const logBuffer = [];
     try {
-      // ★ 変更: handle関数にlogBufferを渡す
       return await handle(request, env, ctx, logBuffer);
     } finally {
-      // ★ 変更: リクエスト処理の最後に、バッファしたログを区切り線付きでまとめて出力
-      console.log(logBuffer.join('\n') + '\n----------------------------------------');
+      // ★ 修正: バッファ内のログを一行ずつループで出力する
+      for (const message of logBuffer) {
+        console.log(message);
+      }
+      console.log('----------------------------------------');
     }
   },
 
