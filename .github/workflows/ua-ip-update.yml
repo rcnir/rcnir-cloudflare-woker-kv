@@ -17,11 +17,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js and wrangler
+      - name: Setup Node.js # ★ 変更: wranglerのインストールと分離
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npm install -g wrangler jq
+
+      - name: Install dependencies # ★ 変更: jqはaptで、wranglerはnpmでインストール
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          npm install -g wrangler
 
       # --- Job 1: Amazon IP CIDRs を KV にアップロード ---
       - name: Fetch and Prepare IP CIDRs
@@ -43,7 +47,7 @@ jobs:
 
       - name: Put IP CIDRs into KV
         run: |
-          npx wrangler kv key put BOT_CIDRS \
+          npx wrangler kv:key put BOT_CIDRS \
             --binding=BOT_BLOCKER_KV \
             --path=final-bot-cidrs.json \
             --remote
