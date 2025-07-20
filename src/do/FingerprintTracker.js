@@ -1,9 +1,9 @@
 // 設定可能な定数
 const RATE_LIMIT_WINDOW_MS = 10 * 1000; // 10秒
-const RATE_LIMIT_THRESHOLD = 5;        // 10秒間に5リクエスト以上で違反
+const RATE_LIMIT_THRESHOLD = 5;         // 10秒間に5リクエスト以上で違反
 
 const PATH_HISTORY_WINDOW_MS = 60 * 1000; // 60秒
-const PATH_HISTORY_THRESHOLD = 10;       // 60秒間に10個以上の異なるパスで違反
+const PATH_HISTORY_THRESHOLD = 10;        // 60秒間に10個以上の異なるパスで違反
 
 const LOCALE_WINDOW_MS = 10 * 1000; // ロケールファンアウトの判定ウィンドウ (10秒)
 const SINGLE_LOCALE_ACCESS_WINDOW_MS = 5 * 1000; // 5秒
@@ -27,8 +27,7 @@ export class FingerprintTracker {
         return {
             count: 0, // 全体の累積違反カウント (Main WorkerのeffectiveCountに影響)
             localeViolationCount: 0, // ロケールに関する違反カウント
-            lastLocale: null, // 前回のアクセスロケール
-            lastLocaleTime: 0, // 前回のロケールアクセス時刻
+            lgRegions: {}, // ロケールファンアウト検出用
             singleLocaleAccess: { // 1ロケール連続アクセス検知用
                 count: 0,
                 firstAccess: 0,
@@ -48,8 +47,6 @@ export class FingerprintTracker {
 
     async fetch(request) {
         const url = new URL(request.url);
-        const now = Date.now(); // typo修正: Date.now()
-        // typo修正: Date.now() をローカルのnow変数に再定義
         const localNow = Date.now();
 
         // 状態がまだロードされていなければロード
@@ -161,14 +158,16 @@ export class FingerprintTracker {
             }
 
             case "/list-high-count-fp": {
+                // このエンドポイントはCronではなくKVから読み取るように変更されるため、このDO内部では不要だが、
+                // 互換性のため残すか、削除する
                 // Cron Triggerから呼び出され、高カウントのFPをリストアップするエンドポイント
-                const data = await this.state.storage.list({ limit: 10000 });
+                // このロジックはメインWorkerのCronジョブで直接KVをリストする形に変更されたため、
+                // このDOインスタンス（sync-job-fp）が他のDOの状態を知ることはない。
+                // したがって、このエンドポイントは実際には利用されなくなる。
+                // ここでは、自身の状態が永久ブロック閾値を超えていたら自身のIDを返す（ただし、メインWorkerはこれを使わない）
                 const highCountFpIds = [];
-                for (const [key, state] of data.entries()) {
-                    if (key === "state" && state && state.count >= 4) {
-                        const fpIdFromDO = this.state.id.toString();
-                        highCountFpIds.push(fpIdFromDO);
-                    }
+                if (this.stateData && this.stateData.count >= 4) {
+                    highCountFpIds.push(this.state.id.toString());
                 }
                 return new Response(JSON.stringify(highCountFpIds), {
                     headers: { "Content-Type": "application/json" }
@@ -181,18 +180,25 @@ export class FingerprintTracker {
                 return new Response(JSON.stringify(this.stateData), { headers: { 'Content-Type': 'application/json' } });
             }
 
-            case "/record-js-execution": { // JS実行を記録するエンドポイント
+            case "/record-js-execution": { // JS実行を記録するエンドポイント (Monorail用)
                 this.stateData.jsExecuted = true;
                 await this.state.storage.put("state", this.stateData);
-                console.log(`[FP_JS_EXEC] FP=${this.state.id.toString()} has executed JS.`);
+                console.log(`[FP_JS_EXEC] FP=${this.state.id.toString()} has executed JS (Monorail).`);
                 return new Response("JS execution recorded.", { status: 200 });
+            }
+
+            case "/internal/record-js-execution-from-html": { // 新しいエンドポイント (HTML埋め込みJS用)
+                this.stateData.jsExecuted = true;
+                await this.state.storage.put("state", this.stateData);
+                console.log(`[FP_JS_EXEC_HTML] FP=${this.state.id.toString()} has executed JS from HTML.`);
+                return new Response("JS execution from HTML recorded.", { status: 200 });
             }
 
             case "/reset-state": {
                 // フィンガープリントIDのデータをリセットするエンドポイント
                 const resetKey = url.searchParams.get("reset_key");
                 if (!this.env.DO_RESET_KEY || resetKey !== this.env.DO_RESET_KEY) {
-                  return new Response("Unauthorized reset attempt.", { status: 401 });
+                    return new Response("Unauthorized reset attempt.", { status: 401 });
                 }
                 await this.state.storage.deleteAll();
                 console.log(`[FP_RESET] Fingerprint ID data reset.`);
@@ -253,35 +259,6 @@ export async function generateFingerprint(request) {
   fingerprintString += `|TZ:${cf.timezone || ""}`; // タイムゾーン (安定している)
   fingerprintString += `|COLO:${cf.colo || ""}`; // データセンターコード (安定している)
   fingerprintString += `|HP:${cf.httpProtocol || ""}`; // HTTPプロトコル (安定している)
-
-  // TLS関連の項目や、クライアント側のTCP/地理情報など、常に変動する可能性のあるものは除外
-  /*
-  fingerprintString += cf.tlsCipher || ""; // TLS暗号スイート
-  fingerprintString += cf.tlsVersion || ""; // TLSバージョン
-  fingerprintString += cf.tlsClientHelloLength || ""; // 常に揺れる
-  fingerprintString += cf.tlsClientRandom || ""; // 常に揺れる
-  fingerprintString += cf.tlsClientCiphersSha1 || ""; // 常に揺れる
-  fingerprintString += cf.tlsClientExtensionsSha1 || ""; // 常に揺れる
-  fingerprintString += cf.tlsClientExtensionsSha1Le || ""; // 常に揺れる
-  fingerprintString += cf.clientTcpRtt || "";
-  fingerprintString += cf.longitude || "";
-  fingerprintString += cf.latitude || "";
-  fingerprintString += cf.city || "";
-  fingerprintString += cf.region || "";
-  fingerprintString += cf.postalCode || "";
-  */
-
-  // IPアドレスのサブネットの一部 (フィンガープリントの安定性を損なうため、FPからは除外)
-  /*
-  const ip = headers.get("CF-Connecting-IP");
-  if (ip) {
-    if (ip.includes('.')) { // IPv4
-      fingerprintString += `|IPS:${ip.split('.').slice(0, 3).join('.')}`;
-    } else if (ip.includes(':')) { // IPv6
-      fingerprintString += `|IPS6:${ip.split(':').slice(0, 4).join(':')}`;
-    }
-  }
-  */
 
   // --- ハッシュ化 ---
   const encoder = new TextEncoder();
