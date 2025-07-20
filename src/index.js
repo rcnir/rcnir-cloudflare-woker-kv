@@ -9,6 +9,29 @@
  * =================================================================
  */
 
+/*
+ * =================================================================
+ * 便利なコマンド (Useful Commands)
+ * =================================================================
+ *
+ * ■ TH判定（信頼された人間）のログだけをリアルタイム表示:
+ * npx wrangler tail shopify-bot-blocker | grep -F "[TH]"
+ *
+ * ■ SH判定（不審な人間）のログだけをリアルタイム表示:
+ * npx wrangler tail shopify-bot-blocker | grep -F "[SH]"
+ *
+ * ■ B判定（ボット）のログだけをリアルタイム表示:
+ * npx wrangler tail shopify-bot-blocker | grep -F "[B]"
+ *
+ * ■ VIOLATION（違反検知）のログだけをリアルタイム表示:
+ * npx wrangler tail shopify-bot-blocker | grep "\[VIOLATION\]"
+ *
+ * ■ フィルタなしで全てのログをリアルタイム表示:
+ * npx wrangler tail shopify-bot-blocker
+ *
+ * =================================================================
+ */
+
 // --- 1. エクスポートとメインハンドラ ---
 
 import { IPStateTracker } from "./do/IPStateTracker.js";
