@@ -178,11 +178,11 @@ async handleLocaleCheck(ip, path) {
   const currentKey = `${lang}-${country}`;
   state.lgRegions[currentKey] = now;
 
-  // --- 国セットのチェック（2国以上 = 違反）---
+  // --- 国セットのチェック（3国以上 = 違反）---
   const countries = new Set(
     Object.keys(state.lgRegions).map(k => k.split("-")[1])
   );
-  const violation = countries.size >= 2;
+  const violation = countries.size >= 3;
 
   // --- 違反時処理 ---
   if (violation) {
