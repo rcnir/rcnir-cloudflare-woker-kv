@@ -43,6 +43,7 @@ export { FingerprintTracker };
 // キャッシュはモジュールスコープで一度だけ初期化
 let learnedBadBotsCache = null;
 let badBotDictionaryCache = null;
+let asnBlocklistCache = null;
 
 export default {
   async fetch(request, env, ctx) {
@@ -59,7 +60,6 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    // (scheduledハンドラは変更なし)
     console.log("Cron Trigger fired: Syncing permanent block list...");
     const id = env.IP_STATE_TRACKER.idFromName("sync-job");
     const stub = env.IP_STATE_TRACKER.get(id);
@@ -102,11 +102,12 @@ export default {
 async function handle(request, env, ctx, logBuffer) {
   const url = new URL(request.url);
 
-  // (管理エンドポイントの処理は変更なし、ロググループ化の対象外)
+  // 管理エンドポイントの処理
   if (url.pathname.startsWith("/admin/") || url.pathname.startsWith("/reset-state") || url.pathname.startsWith("/debug/")) {
-    // This part is omitted for brevity as it's not part of the core logic we're fixing.
-    // You can handle admin/debug logic here, which will not be part of the grouped logging.
-    return new Response("Admin/Debug endpoint accessed. Logging is not grouped for this request.", { status: 200 });
+    // This is a simplified handler for admin/debug endpoints.
+    // They are not part of the grouped logging and don't undergo security checks.
+    // You can add more complex logic here if needed.
+    return new Response(`Admin/Debug endpoint accessed: ${url.pathname}`, { status: 200 });
   }
 
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
@@ -133,10 +134,22 @@ async function handle(request, env, ctx, logBuffer) {
     return new Response("Not Found", { status: 404 });
   }
 
-  // ★ 修正: アセットファイルのスキップ処理を早期に実行
+  // --- ASNブロックリストチェック ---
+  const asn = request.cf?.asn;
+  if (asn) {
+    if (asnBlocklistCache === null) {
+      const blocklistJson = await env.BOT_BLOCKER_KV.get("ASN_BLOCKLIST");
+      asnBlocklistCache = blocklistJson ? JSON.parse(blocklistJson) : [];
+    }
+    if (asnBlocklistCache.includes(String(asn))) {
+      logBuffer.push(`[ASN BLOCK] ASN=${asn} is blocked.`);
+      return new Response("Forbidden", { status: 403 });
+    }
+  }
+
+  // --- アセットファイルのスキップ処理 ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
   if (EXT_SKIP.test(path)) {
-    // JSピクセル検出ロジックのみ実行
     const importantJsPatterns = [
       /^\/\.well-known\/shopify\/monorail\//,
       /^\/\.well-known\/shopify\/monorail\/unstable\/produce_batch/,
@@ -147,46 +160,28 @@ async function handle(request, env, ctx, logBuffer) {
       /^\/cdn\/shop\/t\/\d+\/assets\/global\.js(\?|$)/,
       /^\/cdn\/shopify\/s\/files\/.*\.js(\?|$)/,
     ];
-    let isImportantJsRequest = false;
-    for (const pattern of importantJsPatterns) {
-      if (pattern.test(path)) {
-        isImportantJsRequest = true;
-        break;
-      }
-    }
+    let isImportantJsRequest = importantJsPatterns.some(pattern => pattern.test(path));
     if (isImportantJsRequest) {
       const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint);
       const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
-      // この処理はバックグラウンドで実行され、レスポンスをブロックしない
       ctx.waitUntil(fpTrackerStub.fetch(new Request("https://internal/record-js-execution", {
         method: 'POST',
         headers: {"X-Fingerprint-ID": fingerprint}
       })));
     }
-    // アセットなので、ここで処理を終了してオリジンにリクエストを渡す
     return fetch(request);
   }
 
-// --- 3. 静的ルールによるパス探索型攻撃ブロック ---
-const staticBlockPatterns = [
-  "/wp-",      // WordPress関連
-  ".php",      // PHPファイル全般
-  "phpinfo",   // phpinfoスキャン
-  "phpmyadmin",// phpMyAdminスキャン
-  "/.env",     // 環境設定ファイル
-  "/config",   // 設定ファイル
-  "/admin/",   // 管理画面
-  "/dbadmin",  // DB管理画面
-  "/_profiler",// デバッグツール
-  ".aws",      // AWS認証情報
-  "credentials"// 認証情報
-];
-// 上記パターンのいずれかがパスに含まれていたらブロック
-if (staticBlockPatterns.some(patt => path.includes(patt))) {
-  return logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint, logBuffer);
-}
+  // --- 静的ルールによるパス探索型攻撃ブロック ---
+  const staticBlockPatterns = [
+    "/wp-", ".php", "phpinfo", "phpmyadmin", "/.env", "/config", "/admin/",
+    "/dbadmin", "/_profiler", ".aws", "credentials"
+  ];
+  if (staticBlockPatterns.some(patt => path.includes(patt))) {
+    return logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint, logBuffer);
+  }
 
-  // --- 4. UAベースの分類 ---
+  // --- UAベースの分類 ---
   const safeBotPatterns = ["PetalBot"];
   const botPattern = /\b(\w+bot|bot|crawl(er)?|spider|slurp|fetch|headless|preview|agent|scanner|client|curl|wget|python|perl|java|scrape(r)?|monitor|probe|archive|validator|feed)\b/i;
   
@@ -235,42 +230,76 @@ if (staticBlockPatterns.some(patt => path.includes(patt))) {
     return fetch(request);
   }
 
-  // --- 5. 有害Bot検知＋ペナルティ (ラベルがBの場合) ---
+  // --- 有害Bot検知 (ラベルがBの場合) ---
   if (refinedLabel === "[B]") {
-    // 学習済み有害Botリストのチェック
     if (learnedBadBotsCache === null) {
       const learnedList = await env.BOT_BLOCKER_KV.get("LEARNED_BAD_BOTS", { type: "json" });
       learnedBadBotsCache = new Set(Array.isArray(learnedList) ? learnedList : []);
     }
     for (const patt of learnedBadBotsCache) {
       if (new RegExp(patt, "i").test(ua)) {
-        // ... 違反処理 ...
+        const reason = `unwanted-bot(learned):${patt}`;
+        ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
         return new Response("Not Found", { status: 404 });
       }
     }
-    // 新規有害Bot辞書のチェック
+    
     if (badBotDictionaryCache === null) {
       const object = await env.BLOCKLIST_R2.get("dictionaries/bad-bots.txt");
       badBotDictionaryCache = object ? (await object.text()).split('\n').filter(line => line && !line.startsWith('#')) : [];
     }
     for (const patt of badBotDictionaryCache) {
       if (new RegExp(patt, "i").test(ua)) {
-        // ... 違反・学習処理 ...
+        const reason = `unwanted-bot(new):${patt}`;
+        logBuffer.push(`[LEARNED] New bad bot pattern: ${patt}`);
+        learnedBadBotsCache.add(patt);
+        ctx.waitUntil(env.BOT_BLOCKER_KV.put("LEARNED_BAD_BOTS", JSON.stringify(Array.from(learnedBadBotsCache))));
+        ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
         return new Response("Not Found", { status: 404 });
       }
     }
   }
   
-  // --- 6. 動的ルール実行 (ラベルがSHの場合) ---
+  // --- 動的ルール実行 (ラベルがSHの場合) ---
   if (refinedLabel === "[SH]") {
+    // ヘッダー分析
+    const secChUa = request.headers.get('Sec-Ch-Ua');
+    const acceptLanguage = request.headers.get('Accept-Language');
+    if (!secChUa && !acceptLanguage) {
+      const reason = "missing-headers-on-sh";
+      ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
+      logBuffer.push(`[HEADER BLOCK] IP=${ip} FP=${fingerprint} reason=${reason} UA=${ua}`);
+      return new Response("Forbidden", { status: 403 });
+    }
+
     // ロケールチェック
     const ipLocaleRes = await ipTrackerStub.fetch(new Request("https://internal/check-locale", { method: 'POST', headers: { "CF-Connecting-IP": ip, "Content-Type": "application/json" }, body: JSON.stringify({ path }) }));
     const fpLocaleRes = await fpTrackerStub.fetch(new Request("https://internal/check-locale-fp", { method: 'POST', headers: { "X-Fingerprint-ID": fingerprint, "Content-Type": "application/json" }, body: JSON.stringify({ path }) }));
     
-    let violationDetected = false, ipCount = 0, fpCount = 0, reason = "locale-fanout";
+    let violationDetected = false;
+    let ipCount = 0;
+    let fpCount = 0;
+    const reason = "locale-fanout";
     
-    if (ipLocaleRes.ok) { /* ... */ } else { logBuffer.push(`[DO_ERROR] IP /check-locale failed for IP=${ip}.`); }
-    if (fpLocaleRes.ok) { /* ... */ } else { logBuffer.push(`[DO_ERROR] FP /check-locale-fp failed for FP=${fingerprint}.`); }
+    if (ipLocaleRes.ok) {
+        const { violation, count } = await ipLocaleRes.json();
+        if (violation) {
+            violationDetected = true;
+            ipCount = count;
+        }
+    } else {
+        logBuffer.push(`[DO_ERROR] IP /check-locale failed for IP=${ip}. Status: ${ipLocaleRes.status}`);
+    }
+
+    if (fpLocaleRes.ok) {
+        const { violation, count } = await fpLocaleRes.json();
+        if (violation) {
+            violationDetected = true;
+            fpCount = count;
+        }
+    } else {
+        logBuffer.push(`[DO_ERROR] FP /check-locale-fp failed for FP=${fingerprint}. Status: ${fpLocaleRes.status}`);
+    }
     
     if (violationDetected) {
       await handleViolationSideEffects(ip, ua, reason, Math.max(ipCount, fpCount), env, ctx, fingerprint, fpCount, logBuffer);
@@ -278,17 +307,17 @@ if (staticBlockPatterns.some(patt => path.includes(patt))) {
     }
   }
   
-  // --- 7. Amazon Botなりすましチェック ---
+  // --- Amazon Botなりすましチェック ---
   if (ua.startsWith("AmazonProductDiscovery/1.0")) {
     const isVerified = await verifyBotIp(ip, "amazon", env, logBuffer);
     if (!isVerified) {
       const reason = "amazon-impersonation";
-      // ... 違反処理 ...
+      ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
       return new Response("Not Found", { status: 404 });
     }
   }
 
-  // --- 8. 全チェッククリア ---
+  // --- 全チェッククリア ---
   return fetch(request);
 }
 
@@ -302,8 +331,8 @@ async function handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fin
     ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-1", { expirationTtl: 600 }));
     ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-${fingerprint}`, "temp-1", { expirationTtl: 600 }));
   } else if (effectiveCount === 2) {
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-2", { expirationTtl: 600 }));
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-${fingerprint}`, "temp-2", { expirationTtl: 600 }));
+    ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-2", { expirationTtl: 1800 })); // 30 mins
+    ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-${fingerprint}`, "temp-2", { expirationTtl: 1800 }));
   } else if (effectiveCount === 3) {
     const twentyFourHours = 24 * 3600;
     ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-3", { expirationTtl: twentyFourHours }));
@@ -318,7 +347,7 @@ async function handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fin
 }
 
 function logAndBlock(ip, ua, reason, env, ctx, fingerprint, logBuffer) {
-  logBuffer.push(`[STATIC BLOCK] IP=${ip} FP=${fingerprint} reason=${reason} UA=${ua}`);
+  ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
   return new Response("Not Found", { status: 404 });
 }
 
