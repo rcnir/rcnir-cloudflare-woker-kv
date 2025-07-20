@@ -216,6 +216,9 @@ async function handle(request, env, ctx) {
   }
 
   // ★★★ 変更開始: UAベースの分類と有害Bot検知の順序を調整 (SafeBotもここで判定) ★★★
+  // PetalBotはsafeBotPatternsに属するため、botPatternの定義の前に移動
+  const safeBotPatterns = ["PetalBot"]; // PetalBotは安全だがレート制限対象
+
   // AhrefsBot, PetalBot, Bingbotなどの公式ボットのUser-Agentをパターンに追加
   const botPattern = /\b(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot|ahrefsbot|mj12bot|crawler|scanner)\b/i; 
 
@@ -249,8 +252,6 @@ async function handle(request, env, ctx) {
                   }
               }
               refinedLabel = "[SAFE_BOT]"; // 新しいラベルを導入して区別
-              // SAFE_BOTも早期リターンさせるので、ここで処理を終えることも可能だが、
-              // ログ出力のために下の共通ログまで処理を続ける
               break; 
           }
       }
@@ -343,11 +344,7 @@ async function handle(request, env, ctx) {
   }
 
   // ★★★ 変更終了 ★★★
-  // safeBotPatterns も B判定に含めるため移動
-  const safeBotPatterns = ["PetalBot"]; // PetalBotは安全だがレート制限対象
-  // 上記のif (botPattern.test(ua))ブロック内でrefinedLabelをSAFE_BOTに設定済みのため、
-  // ここでのsafeBotPatternsの処理は不要。その代わり、SAFE_BOTも早期リターンするように修正済み。
-  // そのため、このsafeBotPatternsのループは削除します。
+
 
   // --- 4. アセットファイルならそのまま返す（JSピクセル検出は残す） ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/; // JSファイルもスキップ対象に含める
@@ -545,7 +542,7 @@ async function verifyBotIp(ip, botKey, env) {
     botCidrsCache = await env.BOT_BLOCKER_KV.get("BOT_CIDRS", { type: "json", cacheTtl: 3600 });
   }
   const cidrs = botCidrsCache ? botCidrsCache[botKey] : null;
-  if (!cidrs || !Array.isArray(cidrs) || cidrs.length === 0) {
+  if (!cidrs || !ArrayisArray(cidrs) || cidrs.length === 0) {
     console.warn(`CIDR list for bot '${botKey}' is empty or not found in KV.`);
     return false;
   }
