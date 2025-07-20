@@ -96,6 +96,18 @@ export default {
 
 // --- 2. メインロジック ---
 async function handle(request, env, ctx) {
+    // ★★★ ここから一時的に追加（生ログ出力用） ★★★
+  console.log("--- New Request Details ---");
+  console.log("URL:", request.url);
+  console.log("Method:", request.method);
+  console.log("Headers:");
+  for (let [key, value] of request.headers) {
+      console.log(`  ${key}: ${value}`);
+  }
+  console.log("Request.cf:");
+  console.log(JSON.stringify(request.cf, null, 2)); // request.cf オブジェクト全体をJSON形式で整形して出力
+  console.log("--- End Request Details ---");
+  // ★★★ ここまで一時的に追加 ★★★
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
   const url = new URL(request.url);
