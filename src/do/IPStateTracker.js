@@ -253,3 +253,4 @@ function parseLocale(path) {
   // その後、handleLocaleCheck でこれらのパターンは除外されるため、誤検知の原因にはならない。
   return { lang: "unknown", country: "unknown" };
 }
+
