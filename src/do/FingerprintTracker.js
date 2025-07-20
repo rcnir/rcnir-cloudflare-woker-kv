@@ -217,94 +217,45 @@ export async function generateFingerprint(request) {
 
     let fingerprintString = "";
 
-    // 1. User-Agent のコア部分 (最も安定したブラウザ/OS情報のみ)
-    // これをフィンガープリントの主要な要素とします。
+    // 1. User-Agent のコア部分 (極限まで絞り込み)
     const ua = headers.get("User-Agent") || "";
-    // 主要ブラウザとメジャーバージョンに絞る (例: Chrome/138, Firefox/140)
-    const browserMatch = ua.match(/(Chrome|Firefox|Safari|Edg|OPR|MSIE|Trident)\/(\d+)/i); 
-    // 主要OSとそのメジャーバージョンに絞る (例: Windows NT 10.0, Mac OS X 10_15)
-    const osMatch = ua.match(/(Windows NT \d+\.\d+|Macintosh; Intel Mac OS X \d+(_\d+)?|Linux|Android|iPhone OS \d+(_\d+)?|iPad OS \d+(_\d+)?)/i); 
     
-    // ブラウザの識別 (例: B:Chrome-138)
+    // ブラウザ名とメジャーバージョン (例: Chrome/138 -> "Chrome-138")
+    // Safari, Edge, Opera, IE/Trident も対応
+    const browserMatch = ua.match(/(Chrome|Firefox|Safari|Edg|OPR|MSIE|Trident)\/(\d+)/i); 
     if (browserMatch && browserMatch[1] && browserMatch[2]) {
         fingerprintString += `B:${browserMatch[1].replace('OPR', 'Opera')}-${browserMatch[2]}`;
     } else {
-        // 認識できないブラウザの場合、User-Agent全体をハッシュ化するが、長すぎる場合は汎用化
-        if (ua.length > 200 || /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent)/i.test(ua)) {
-            fingerprintString += `B:GenericBotOrUnknown`;
-        } else {
-            fingerprintString += `B:${ua}`;
-        }
+        // 認識できないブラウザの場合、汎用化
+        fingerprintString += `B:UnknownBrowser`;
     }
 
-    // OSの識別 (例: OS:Macintosh_Intel_Mac_OS_X_10_15)
+    // OS名とメジャーバージョン (例: "Macintosh; Intel Mac OS X 10_15_7" -> "macOS-10_15")
+    const osMatch = ua.match(/(Windows NT \d+\.\d+|Macintosh; Intel Mac OS X \d+(_\d+)?|Linux|Android|iPhone OS \d+(_\d+)?|iPad OS \d+(_\d+)?)/i); 
     if (osMatch && osMatch[0]) {
-        fingerprintString += `_OS:${osMatch[0].replace(/ /g, '_').replace(/\./g, '_').replace(/;/g, '_')}`;
+        const osName = osMatch[0].split(';')[0].trim(); // "Macintosh"
+        const osVersionMatch = osMatch[0].match(/(\d+(_\d+)?)/); // "10_15"
+        const osVersion = osVersionMatch ? osVersionMatch[0].replace(/_/g, '-') : '';
+        fingerprintString += `_OS:${osName.replace(/ /g, '_')}-${osVersion}`;
     } else {
-        fingerprintString += `_OS:Unknown`; // 認識できないOS
+        fingerprintString += `_OS:UnknownOS`; // 認識できないOS
     }
     
-    // ★★★ これまでのすべてのヘッダーは除外します ★★★
-    // これらのヘッダーはリクエストの種類、タイミング、ブラウザの内部挙動、またはネットワークプロキシによって変動するため、不安定性の原因となります。
-    // Accept ヘッダー群は除外
-    /* fingerprintString += `|AL:${headers.get("Accept-Language") || ""}`; */
-    /* fingerprintString += `|AE:${headers.get("Accept-Encoding") || ""}`; */
-    /* fingerprintString += `|A:${headers.get("Accept") || ""}`; */
-
-    // Client Hints も除外
-    /* fingerprintString += `|SCU:${headers.get("Sec-Ch-Ua") || ""}`; */
-    /* fingerprintString += `|SCUM:${headers.get("Sec-Ch-Ua-Mobile") || ""}`; */
-    /* fingerprintString += `|SCUP:${headers.get("Sec-Ch-Ua-Platform") || ""}`; */
-
-    // Sec-Fetch ヘッダー群も除外
-    /* fingerprintString += `|SFS:${headers.get("Sec-Fetch-Site") || ""}`; */
-    /* fingerprintString += `|SFM:${headers.get("Sec-Fetch-Mode") || ""}`; */
-    /* fingerprintString += `|SFD:${headers.get("Sec-Fetch-Dest") || ""}`; */
-    /* fingerprintString += `|SFU:${headers.get("Sec-Fetch-User") || ""}`; */
-
-    // Referer も除外（維持）
-    /* fingerprintString += `|R:${headers.get("Referer") || ""}`; */
-    // Upgrade-Insecure-Requests も除外（リクエストの種類で変動し得る）
-    /* fingerprintString += `|UIR:${headers.get("Upgrade-Insecure-Requests") || ""}`; */
+    // ★★★ これまでのすべてのヘッダーは、リクエストの種類で変動するため、フィンガープリントから完全に除外します ★★★
+    /* Accept-Language, Accept-Encoding, Accept */
+    /* Sec-Ch-Ua, Sec-Ch-Ua-Mobile, Sec-Ch-Ua-Platform */
+    /* Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest, Sec-Fetch-User */
+    /* Referer */
+    /* Upgrade-Insecure-Requests */
 
 
     // 2. Cloudflare メタデータ (request.cf) - ネットワーク層の真に安定した特性
-    // IPアドレスや変動しやすいTLS情報は含めない。
+    // ASN (ISP) と Country (国コード) のみを含めます。
     fingerprintString += `|ASN:${cf.asn || ""}`;    // AS番号 (ユーザーのISP)
     fingerprintString += `|C:${cf.country || ""}`;  // 国コード (ユーザーの所在地)
-    fingerprintString += `|TZ:${cf.timezone || ""}`; // タイムゾーン (ユーザーの地域設定)
-    fingerprintString += `|COLO:${cf.colo || ""}`; // データセンターコード (リクエストがどこに着地したか)
-    // HTTPプロトコルも除外（HTTP/1.1, HTTP/2, HTTP/3など変わる可能性があるため）
-    /* fingerprintString += `|HP:${cf.httpProtocol || ""}`; */ 
 
-    // TLS関連の項目や、クライアント側のTCP/地理情報など、常に変動する可能性のあるものは引き続き除外（コメントアウトを維持）
-    /*
-    fingerprintString += cf.tlsCipher || "";
-    fingerprintString += cf.tlsVersion || "";
-    fingerprintString += cf.tlsClientHelloLength || "";
-    fingerprintString += cf.tlsClientRandom || "";
-    fingerprintString += cf.tlsClientCiphersSha1 || "";
-    fingerprintString += cf.tlsClientExtensionsSha1 || "";
-    fingerprintString += cf.tlsClientExtensionsSha1Le || "";
-    fingerprintString += cf.clientTcpRtt || "";
-    fingerprintString += cf.longitude || "";
-    fingerprintString += cf.latitude || "";
-    fingerprintString += cf.city || "";
-    fingerprintString += cf.region || "";
-    fingerprintString += cf.postalCode || "";
-    */
-
-    // IPアドレスのサブネットの一部 (フィンガープリントの安定性を損なうため、FPからは除外)
-    /*
-    const ip = headers.get("CF-Connecting-IP");
-    if (ip) {
-      if (ip.includes('.')) { // IPv4
-        fingerprintString += `|IPS:${ip.split('.').slice(0, 3).join('.')}`;
-      } else if (ip.includes(':')) { // IPv6
-        fingerprintString += `|IPS6:${ip.split(':').slice(0, 4).join(':')}`;
-      }
-    }
-    */
+    // その他の request.cf 属性は全て除外します（HTTPプロトコル、タイムゾーン、データセンター、TLS情報など）
+    /* TZ, COLO, HP, TLS関連, RTT, 緯度経度, 都市, 地域, 郵便番号などはすべて除外 */
 
     // --- ハッシュ化 ---
     const encoder = new TextEncoder();
