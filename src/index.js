@@ -77,8 +77,8 @@ export default {
     // ★変更: FingerprintTrackerから高カウントフィンガープリントを取得し、KVに同期★
     // Note: FP_TRACKERのlist-high-count-fpは、sync-job-fpという特定のIDのDOインスタンスが
     // FP全体のサマリーを持つという前提が必要。あるいは各FP-IDのDOインスタンスをすべてスキャンするロジックが必要。
-    // 現状はFP_TRACKERのsync-job-fpが空のFP-IDリストを返す可能性があります。
-    // 必要に応じてこの同期ロジックを調整します。
+    // 現状のlist-high-count-fpは、呼び出したFP-DO自身のカウントが閾値を超えた場合にそのFP-DOのIDを返すロジックです。
+    // 全てのFPを同期したい場合は、この同期ロジックを調整する必要があります（例: KVを直接スキャン）。
     const fpSyncId = env.FINGERPRINT_TRACKER.idFromName("sync-job-fp");
     const fpStub = env.FINGERPRINT_TRACKER.get(fpSyncId);
     const fpRes = await fpStub.fetch(new Request("https://internal/list-high-count-fp")); // FingerprintTrackerから高カウントFPを取得
@@ -108,10 +108,11 @@ async function handle(request, env, ctx) {
   // ★変更: リクエストからフィンガープリントを生成★
   const fingerprint = await generateFingerprint(request);
 
-  // ★★★ 変更: H判定の場合のみ詳細ログを出力（デバッグ用） ★★★
+  // ★★★ 変更: H判定の場合のみ詳細ログを出力（デバッグ用） --- CPU時間制限対策のため、通常はコメントアウト推奨 ★★★
   // このデバッグログは、フィンガープリント選定が完了したら削除してください。
-  const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
-  const tempLabelForDebug = botPattern.test(ua) ? "[B]" : "[H]";
+  /*
+  const botPatternForDebug = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
+  const tempLabelForDebug = botPatternForDebug.test(ua) ? "[B]" : "[H]";
   if (tempLabelForDebug === "[H]") {
     console.log("--- New Request Details (H-labeled) ---");
     console.log("URL:", request.url);
@@ -124,6 +125,7 @@ async function handle(request, env, ctx) {
     console.log(JSON.stringify(request.cf, null, 2));
     console.log("--- End Request Details (H-labeled) ---");
   }
+  */
   // ★★★ 変更ここまで ★★★
 
 
@@ -212,6 +214,7 @@ async function handle(request, env, ctx) {
   }
 
   // --- 5. UAベースの分類と、安全Botのレート制御 ---
+  const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i; // H判定デバッグログの変数と衝突しないよう再定義
   const label = botPattern.test(ua) ? "[B]" : "[H]"; // 既存のUAベース分類
   console.log(`${label} ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`); // FPログ追加
 
@@ -482,8 +485,8 @@ async function handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fin
       fingerprint, // FPを追加
       userAgent: ua, 
       reason, 
-      ipCount,   // IPの最終カウント
-      fpCount,   // FPの最終カウント
+      ipCount,    // IPの最終カウント
+      fpCount,    // FPの最終カウント
       timestamp: new Date().toISOString() 
     });
     // R2のオブジェクト名もIPとFPを組み合わせるなどして一意性を高める
@@ -555,7 +558,8 @@ function ipInCidr(ip, cidr) {
     if (isV6 !== ip.includes(':')) return false;
     const ipVal = ipToBigInt(ip);
     const baseVal = ipToBigInt(base);
-    const mask = ( (1n << BigInt(prefix)) - 1n ) << BigInt(totalBits - prefix);
+    const mask = ( (1n << BigInt(totalBits - prefix)) - 1n ) ^ ((1n << BigInt(totalBits)) - 1n); // 正しいマスク計算
+    // IPv6の場合、マスク計算はより複雑になることがあるので注意。ここでは一般的なCIDRのビットマスクを想定。
     return (ipVal & mask) === (baseVal & mask);
   } catch (e) {
     console.error(`[ipInCidr] Error: ip='${ip}' cidr='${cidr}'`, e);
