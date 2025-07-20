@@ -39,11 +39,11 @@
 // --- 1. エクスポートとメインハンドラ ---
 
 import { IPStateTracker } from "./do/IPStateTracker.js";
-// ★追加: FingerprintTracker DOとフィンガープリント生成関数をインポート★
+// ★変更: FingerprintTracker DOとフィンガープリント生成関数をインポート★
 import { FingerprintTracker, generateFingerprint } from "./do/FingerprintTracker.js";
 
 export { IPStateTracker };
-export { FingerprintTracker }; // ★追加: Durable Objectとして公開するために必要★
+export { FingerprintTracker }; // ★変更: Durable Objectとして公開するために必要★
 
 let botCidrsCache = null;
 let unwantedBotPatternsCache = null;
@@ -74,7 +74,11 @@ export default {
       console.log("No new IPs to permanently block.");
     }
 
-    // ★追加: FingerprintTrackerから高カウントフィンガープリントを取得し、KVに同期★
+    // ★変更: FingerprintTrackerから高カウントフィンガープリントを取得し、KVに同期★
+    // Note: FP_TRACKERのlist-high-count-fpは、sync-job-fpという特定のIDのDOインスタンスが
+    // FP全体のサマリーを持つという前提が必要。あるいは各FP-IDのDOインスタンスをすべてスキャンするロジックが必要。
+    // 現状はFP_TRACKERのsync-job-fpが空のFP-IDリストを返す可能性があります。
+    // 必要に応じてこの同期ロジックを調整します。
     const fpSyncId = env.FINGERPRINT_TRACKER.idFromName("sync-job-fp");
     const fpStub = env.FINGERPRINT_TRACKER.get(fpSyncId);
     const fpRes = await fpStub.fetch(new Request("https://internal/list-high-count-fp")); // FingerprintTrackerから高カウントFPを取得
@@ -96,26 +100,32 @@ export default {
 
 // --- 2. メインロジック ---
 async function handle(request, env, ctx) {
-    // ★★★ ここから一時的に追加（生ログ出力用） ★★★
-  console.log("--- New Request Details ---");
-  console.log("URL:", request.url);
-  console.log("Method:", request.method);
-  console.log("Headers:");
-  for (let [key, value] of request.headers) {
-      console.log(`  ${key}: ${value}`);
-  }
-  console.log("Request.cf:");
-  console.log(JSON.stringify(request.cf, null, 2)); // request.cf オブジェクト全体をJSON形式で整形して出力
-  console.log("--- End Request Details ---");
-  // ★★★ ここまで一時的に追加 ★★★
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
   const url = new URL(request.url);
   const path = url.pathname.toLowerCase();
 
-  // ★追加: リクエストからフィンガープリントを生成★
+  // ★変更: リクエストからフィンガープリントを生成★
   const fingerprint = await generateFingerprint(request);
-  // console.log(`[DEBUG] FP=${fingerprint} IP=${ip}`); // デバッグ用にフィンガープリントを出力
+
+  // ★★★ 変更: H判定の場合のみ詳細ログを出力（デバッグ用） ★★★
+  // このデバッグログは、フィンガープリント選定が完了したら削除してください。
+  const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
+  const tempLabelForDebug = botPattern.test(ua) ? "[B]" : "[H]";
+  if (tempLabelForDebug === "[H]") {
+    console.log("--- New Request Details (H-labeled) ---");
+    console.log("URL:", request.url);
+    console.log("Method:", request.method);
+    console.log("Headers:");
+    for (let [key, value] of request.headers) {
+        console.log(`  ${key}: ${value}`);
+    }
+    console.log("Request.cf:");
+    console.log(JSON.stringify(request.cf, null, 2));
+    console.log("--- End Request Details (H-labeled) ---");
+  }
+  // ★★★ 変更ここまで ★★★
+
 
   // 🔧 **デバッグ用：KVに保存された全ブロックIP/FPを取得**
   if (url.pathname === "/debug/list-blocked-ips") {
@@ -130,6 +140,26 @@ async function handle(request, env, ctx) {
       headers: { "Content-Type": "application/json" }
     });
   }
+  // 🔧 **デバッグ用：特定のフィンガープリントのDO状態を取得**
+  if (url.pathname.startsWith("/debug/get-fp-state/")) {
+    const targetFingerprint = url.pathname.split("/").pop();
+    if (!targetFingerprint) return new Response("Missing fingerprint ID", { status: 400 });
+
+    const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(targetFingerprint);
+    const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
+    
+    // FP DOの /get-state エンドポイントを呼び出す
+    const res = await fpTrackerStub.fetch(new Request("https://internal/get-state", {
+        headers: {"X-Fingerprint-ID": targetFingerprint} // 必要であればDOにIDを渡す
+    }));
+
+    if (res.ok) {
+        return new Response(await res.json(), { headers: { "Content-Type": "application/json" } });
+    } else {
+        return new Response(`Failed to get FP state: ${res.status} ${await res.text()}`, { status: res.status });
+    }
+  }
+
 
   // --- 1. Cookieホワイトリスト（最優先） ---
   const cookieHeader = request.headers.get("Cookie") || "";
@@ -165,13 +195,26 @@ async function handle(request, env, ctx) {
   // --- 4. アセットファイルならそのまま ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
   if (EXT_SKIP.test(path)) {
+    // ★変更: JSピクセルリクエストの検出と記録 ★
+    // MonorailのようなShopifyのJSピクセルもここに含まれる
+    const monorailPixelPattern = /^\/\.well-known\/shopify\/monorail\//;
+    if (monorailPixelPattern.test(path)) {
+        const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint);
+        const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
+        
+        // JSが実行されたことをDurable Objectに記録 (非同期)
+        ctx.waitUntil(fpTrackerStub.fetch(new Request("https://internal/record-js-execution", {
+            method: 'POST',
+            headers: { "X-Fingerprint-ID": fingerprint } // FP用のDOにFPを渡す
+        })));
+    }
     return fetch(request);
   }
 
   // --- 5. UAベースの分類と、安全Botのレート制御 ---
-  const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
-  const label = botPattern.test(ua) ? "[B]" : "[H]";
+  const label = botPattern.test(ua) ? "[B]" : "[H]"; // 既存のUAベース分類
   console.log(`${label} ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`); // FPログ追加
+
 
   const safeBotPatterns = ["PetalBot"];
   for (const safeBotPattern of safeBotPatterns) {
@@ -199,12 +242,41 @@ async function handle(request, env, ctx) {
   const ipTrackerId = env.IP_STATE_TRACKER.idFromName(ip);
   const ipTrackerStub = env.IP_STATE_TRACKER.get(ipTrackerId);
 
-  const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint); // ★追加: フィンガープリントベースのDO
-  const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId); // ★追加★
+  const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint); // ★変更: フィンガープリントベースのDO
+  const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId); // ★変更★
 
 
-  // 有害Bot検知＋ペナルティ
-  if (label === "[B]") {
+  // ★★★ 変更: H判定の2分化 (TH/SH) と、それに基づくロジックの適用 ★★★
+  let refinedLabel = label; // 最終的な判定ラベル (B, TH, SH)
+
+  if (label === "[H]") { // UAで人間と判定された場合のみTH/SH判定
+    // Durable ObjectからJS実行状態を取得
+    const fpStateRes = await fpTrackerStub.fetch(new Request("https://internal/get-state", {
+        headers: { "X-Fingerprint-ID": fingerprint } // FP用のDOにFPを渡す
+    }));
+
+    if (fpStateRes.ok) {
+        const fpState = await fpStateRes.json();
+        if (fpState.jsExecuted) {
+            refinedLabel = "[TH]"; // 本物の人間 (Trusted Human)
+            console.log(`[TH] ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`);
+            // THであれば、以下の動的ルール実行（ロケールチェック、行動追跡）をスキップすることも可能
+            // 例: return fetch(request); // ここで処理を終了し、オリジンへ転送 (パフォーマンス最適化)
+        } else {
+            refinedLabel = "[SH]"; // 疑わしい人間 (Suspicious Human)
+            console.log(`[SH] ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`);
+        }
+    } else {
+        // DOからの状態取得に失敗した場合もSHとして扱うか、エラーログを出力
+        console.error(`[DO_ERROR] Failed to get FP state for ${fingerprint}. Status: ${fpStateRes.status}. Treating as SH.`);
+        refinedLabel = "[SH]"; // 安全のためSHとして扱う
+    }
+  }
+  // ★★★ 変更ここまで ★★★
+
+
+  // 有害Bot検知＋ペナルティ (ラベルは refinedLabel を使用)
+  if (refinedLabel === "[B]") { // UAでボットと判定された場合
     if (learnedBadBotsCache === null) {
       const learnedList = await env.BOT_BLOCKER_KV.get("LEARNED_BAD_BOTS", { type: "json" });
       learnedBadBotsCache = new Set(Array.isArray(learnedList) ? learnedList : []);
@@ -216,18 +288,15 @@ async function handle(request, env, ctx) {
         const ipRes = await ipTrackerStub.fetch(new Request("https://internal/trigger-violation", {
           headers: {"CF-Connecting-IP": ip}
         }));
-        // フィンガープリントベースのカウントを更新 ★追加★
+        // フィンガープリントベースのカウントを更新
         const fpRes = await fpTrackerStub.fetch(new Request("https://internal/track-violation", {
           headers: {"X-Fingerprint-ID": fingerprint} // FP_TRACKERにフィンガープリントIDを渡す
         }));
 
         if (ipRes.ok && fpRes.ok) { // 両方のDO更新が成功したら
           const { count: ipCount } = await ipRes.json();
-          const { count: fpCount } = await fpRes.json(); // FPのカウントも取得
+          const { count: fpCount } = await fpRes.json();
 
-          // ブロック処理はIPまたはFPの高い方で判断することもできるが、
-          // まずはIPベースのまま handleViolationSideEffects を呼び出し
-          // handleViolationSideEffects内でFPベースの処理も追加
           await handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fingerprint, fpCount);
         } else {
             console.error(`[DO_ERROR] Failed to trigger violation for IP=${ip} FP=${fingerprint}. IP DO Status: ${ipRes.status}, FP DO Status: ${fpRes.status}`);
@@ -252,7 +321,7 @@ async function handle(request, env, ctx) {
         const ipRes = await ipTrackerStub.fetch(new Request("https://internal/trigger-violation", {
           headers: {"CF-Connecting-IP": ip}
         }));
-        // フィンガープリントベースのカウントを更新 ★追加★
+        // フィンガープリントベースのカウントを更新
         const fpRes = await fpTrackerStub.fetch(new Request("https://internal/track-violation", {
           headers: {"X-Fingerprint-ID": fingerprint}
         }));
@@ -270,8 +339,18 @@ async function handle(request, env, ctx) {
     }
   }
 
-  // Humanアクセス：国跨ぎ言語切替による不正検知
-  if (label === "[H]") {
+  // Humanアクセス（THまたはSH）に対する動的ルール実行
+  // THは原則スキップ、SHのみ詳細チェック
+  if (refinedLabel === "[H]" || refinedLabel === "[TH]" || refinedLabel === "[SH]") { //念のため全てのH判定を含める
+    // ★★★ 変更: THの場合はロケールチェックと行動追跡をスキップ ★★★
+    if (refinedLabel === "[TH]") {
+        // THは既に安全と判断されているため、追加の動的ルールはスキップし、そのまま通過させる
+        // console.log(`[INFO] TH user ${ip} (${fingerprint}) bypassed dynamic rules.`); // デバッグログ
+        return fetch(request);
+    }
+    // ★★★ 変更ここまで ★★★
+
+    // 以下のロジックは refinedLabel が "[SH]" の場合にのみ実行される
     // ロケールチェックもIPとフィンガープリントの両方で実施する
     const ipLocaleRes = await ipTrackerStub.fetch(new Request("https://internal/check-locale", {
       method: 'POST',
@@ -282,7 +361,7 @@ async function handle(request, env, ctx) {
       body: JSON.stringify({ path })
     }));
 
-    const fpLocaleRes = await fpTrackerStub.fetch(new Request("https://internal/check-locale-fp", { // ★追加: FP用のロケールチェック
+    const fpLocaleRes = await fpTrackerStub.fetch(new Request("https://internal/check-locale-fp", {
       method: 'POST',
       headers: {
         "X-Fingerprint-ID": fingerprint, // FP用のDOにFPを渡す
@@ -290,6 +369,19 @@ async function handle(request, env, ctx) {
       },
       body: JSON.stringify({ path })
     }));
+
+    // ★★★ 変更: 行動パターン追跡のためのDO呼び出し ★★★
+    // THはスキップされるので、SHまたはBの場合にのみ実行される
+    ctx.waitUntil(fpTrackerStub.fetch(new Request("https://internal/track-behavior", {
+      method: 'POST',
+      headers: {
+        "X-Fingerprint-ID": fingerprint,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ path: url.pathname }) // アクセスパスを送信
+    })));
+    // ★★★ 変更ここまで ★★★
+
 
     // どちらかのロケールチェックで違反が検知されたらブロック
     let violationDetected = false;
@@ -302,7 +394,6 @@ async function handle(request, env, ctx) {
       if (violation) {
         violationDetected = true;
         ipCount = count;
-        // console.log(`[DEBUG] IP Locale Violation: ${ip} count=${count}`); // デバッグログ
       }
     } else {
       console.error(`[DO_ERROR] IP DO /check-locale failed for IP=${ip}. Status: ${ipLocaleRes.status}`);
@@ -313,17 +404,12 @@ async function handle(request, env, ctx) {
       if (violation) {
         violationDetected = true;
         fpCount = count;
-        // console.log(`[DEBUG] FP Locale Violation: ${fingerprint} count=${count}`); // デバッグログ
       }
     } else {
       console.error(`[DO_ERROR] FP DO /check-locale-fp failed for FP=${fingerprint}. Status: ${fpLocaleRes.status}`);
     }
 
     if (violationDetected) {
-      // 違反時の処理は、IPまたはFPのいずれかで違反が検知されたら実行
-      // count は、違反を検知した方（IPまたはFP）のカウントを渡すか、両方を渡して判断
-      // ここでは、どちらかのDOが違反と判断したら、そのDOのカウントを優先してhandleViolationSideEffectsに渡す
-      // より厳しくするなら Math.max(ipCount, fpCount) などのロジックも検討
       await handleViolationSideEffects(ip, ua, reason, Math.max(ipCount, fpCount), env, ctx, fingerprint, fpCount);
       return new Response("Not Found", { status: 404 });
     }
@@ -340,7 +426,7 @@ async function handle(request, env, ctx) {
       const ipRes = await ipTrackerStub.fetch(new Request("https://internal/trigger-violation", {
         headers: {"CF-Connecting-IP": ip}
       }));
-      // フィンガープリントベースのカウントを更新 ★追加★
+      // フィンガープリントベースのカウントを更新
       const fpRes = await fpTrackerStub.fetch(new Request("https://internal/track-violation", {
         headers: {"X-Fingerprint-ID": fingerprint}
       }));
@@ -364,7 +450,7 @@ async function handle(request, env, ctx) {
 
 // --- 3. コアヘルパー関数 ---
 
-// ★修正: fingerprint と fpCount パラメータを追加★
+// ★変更: fingerprint と fpCount パラメータを追加★
 async function handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fingerprint, fpCount) {
   // ログ出力もIPとFPの両方を表示するように変更
   console.log(`[VIOLATION] IP=${ip} FP=${fingerprint} reason=${reason} IP_count=${ipCount} FP_count=${fpCount}`);
