@@ -12,11 +12,12 @@ export class FingerprintTracker {
         this.state = state;
         this.env = env;
         // Durable Objectのストレージから状態を復元
+        // stateDataに全ての状態を集約し、単一のキーで管理
         this.state.blockConcurrencyWhile(async () => {
             this.stateData = (await this.state.storage.get("state")) || {
-                count: 0, // 既存の違反カウント (Durable Object全体の違反カウント)
+                count: 0, // このフィンガープリントID全体の違反カウント
                 lastAccessTime: 0,
-                requestCount: 0,
+                requestCount: 0, // 短期間のリクエストカウント
                 pathHistory: [], // { path: string, timestamp: number }[]
                 lastResetTime: Date.now(), // レート制限のリセット時間
                 localeViolationCount: 0, // ロケールファンアウト用のカウント
@@ -31,6 +32,7 @@ export class FingerprintTracker {
         const now = Date.now();
 
         // 状態をロード（コンストラクタで既にロードされているはずだが、念のため）
+        // Durable Objectsのライフサイクル管理は複雑なため、念のためのチェックは有効
         if (!this.stateData) {
             this.stateData = await this.state.storage.get("state") || {
                 count: 0,
@@ -47,20 +49,22 @@ export class FingerprintTracker {
         // 内部APIエンドポイントの処理
         switch (url.pathname) {
             case "/track-violation": {
-                // 既存の違反追跡ロジック
+                // 外部（メインWorker）から明示的に違反が通知された場合のロジック
+                // 例: UAベースの既知のボット検知など
                 let currentCount = this.stateData.count;
                 currentCount++;
                 this.stateData.count = currentCount;
                 await this.state.storage.put("state", this.stateData);
                 return new Response(JSON.stringify({ count: currentCount }), { headers: { 'Content-Type': 'application/json' } });
             }
+
             case "/check-locale-fp": {
-                // ロケールチェックロジック (FingerprintTracker用)
-                const { path } = await request.json(); // Workerからpathを受信
+                // フィンガープリントIDベースのロケールファンアウトチェック
+                const { path } = await request.json(); // メインWorkerからpathを受信
 
-                const { lang, country } = parseLocale(path); // parseLocaleは後で定義
+                const { lang, country } = parseLocale(path);
 
-                // 'unknown'なロケールは処理対象外とする
+                // 'unknown'なロケールは処理対象外とする (システムパスなど)
                 if (lang === "unknown" || country === "unknown") {
                     return new Response(JSON.stringify({ violation: false, count: this.stateData.localeViolationCount }), {
                         headers: { "Content-Type": "application/json" }
@@ -68,15 +72,15 @@ export class FingerprintTracker {
                 }
 
                 let violationDetected = false;
-                // 古い記録の掃除 (LOCALE_WINDOW_MS は IPStateTracker と合わせるか、このDO内で定義)
-                // ここではシンプルに、前回のロケールと国を比較
-                const LOCALE_WINDOW_MS = 10 * 1000; // 10秒
+                const LOCALE_WINDOW_MS = 10 * 1000; // ロケールファンアウトの判定ウィンドウ (10秒)
 
+                // 前回のロケールと異なる、かつ短時間でのアクセスであれば違反
                 if (this.stateData.lastLocale && this.stateData.lastLocale !== `${lang}-${country}`) {
-                    if (now - this.stateData.lastLocaleTime < LOCALE_WINDOW_MS) { // 10秒以内に異なるロケール
+                    if (now - this.stateData.lastLocaleTime < LOCALE_WINDOW_MS) {
                         violationDetected = true;
                         this.stateData.localeViolationCount++; // ロケール違反カウント増加
-                        this.stateData.count = Math.max(this.stateData.count, this.stateData.localeViolationCount); // 全体カウントも更新
+                        // 全体カウントは、各種類の違反カウントの最大値にするか、単純加算するか検討
+                        // ここでは現状維持で、後でメインWorker側でMath.maxを使用
                     }
                 }
                 
@@ -87,41 +91,70 @@ export class FingerprintTracker {
 
                 return new Response(JSON.stringify({ violation: violationDetected, count: this.stateData.localeViolationCount }), { headers: { 'Content-Type': 'application/json' } });
             }
+
             case "/track-behavior": {
-                // ★ 新しい行動パターン追跡ロジック ★
+                // ★ フィンガープリントIDごとの行動パターン追跡と違反検知ロジック ★
                 const { path } = await request.json();
 
-                // 1. レート制限のチェックと更新
+                // 1. レート制限のチェックと更新 (高速アクセス検知)
                 if (now - this.stateData.lastResetTime > RATE_LIMIT_WINDOW_MS) {
                     this.stateData.requestCount = 0;
                     this.stateData.lastResetTime = now;
                 }
                 this.stateData.requestCount++;
                 if (this.stateData.requestCount > RATE_LIMIT_THRESHOLD) {
-                    console.log(`[FP_BEHAVIOR_VIOLATION] High request rate for FP. Count: ${this.stateData.requestCount}`);
-                    this.stateData.count++; // 違反カウント増加
+                    console.log(`[FP_BEHAVIOR_VIOLATION] High request rate for FP. Requests in window: ${this.stateData.requestCount}`);
+                    // 違反カウントを増加 (FP全体のカウント)
+                    // この増加分もメインWorker側で effectiveCount に考慮される
+                    this.stateData.count++; 
                 }
 
-                // 2. パス履歴の追跡と不自然な遷移のチェック
+                // 2. パス履歴の追跡と不自然な遷移のチェック (多岐にわたるパスアクセス検知)
                 this.stateData.pathHistory.push({ path, timestamp: now });
-                // 古い履歴を削除
+                // 古い履歴を削除 (指定ウィンドウ外のアクセスをクリア)
                 this.stateData.pathHistory = this.stateData.pathHistory.filter(entry => now - entry.timestamp < PATH_HISTORY_WINDOW_MS);
 
                 const uniquePaths = new Set(this.stateData.pathHistory.map(entry => entry.path));
                 if (uniquePaths.size > PATH_HISTORY_THRESHOLD) {
                     console.log(`[FP_BEHAVIOR_VIOLATION] Too many unique paths for FP. Unique paths: ${uniquePaths.size}`);
-                    this.stateData.count++; // 違反カウント増加
+                    // 違反カウントを増加
+                    this.stateData.count++; 
                 }
 
-                this.stateData.lastAccessTime = now;
-                await this.state.storage.put("state", this.stateData); // 状態を保存
+                this.stateData.lastAccessTime = now; // 最終アクセス時刻を更新
+                await this.state.storage.put("state", this.stateData); // 更新された状態を永続化
 
+                // メインWorkerに現在の状態を返す
                 return new Response(JSON.stringify({
-                    count: this.stateData.count, // FP全体の違反カウント
+                    count: this.stateData.count, // FP全体の現在の違反カウント
                     requestCount: this.stateData.requestCount,
                     uniquePaths: uniquePaths.size
                 }), { headers: { 'Content-Type': 'application/json' } });
             }
+
+            case "/list-high-count-fp": {
+                // Cron Triggerから呼び出され、高カウントのFPをリストアップするエンドポイント
+                // FingerprintTrackerの全インスタンスのデータをリストアップするわけではない点に注意
+                // 'sync-job-fp'という固定IDのDOインスタンスがリストアップを行う
+                const data = await this.state.storage.list({ limit: 10000 }); // 全てのフィンガープリントIDの状態を取得
+                const highCountFpIds = [];
+                for (const [key, state] of data.entries()) {
+                    // keyはフィンガープリントIDではない。各DOインスタンスは自身のIDをキーとして持たない。
+                    // 実際には、"state"というキーで保存されたthis.stateDataからcountを取り出す
+                    if (key === "state" && state && state.count >= 4) { // このDOインスタンスのカウントが4以上か
+                        // このDOのID（フィンガープリントID）自体を取得する必要がある
+                        // Durable Objectは自身のIDを知ることができる
+                        const fpIdFromDO = this.state.id.toString(); // Durable ObjectのIDはString型
+                        highCountFpIds.push(fpIdFromDO);
+                    }
+                }
+                // このリストは本来、Cron Triggerを呼び出すWorkerから来るべき。
+                // ここでは単一のDOインスタンス（sync-job-fp）のカウントを返す
+                return new Response(JSON.stringify(highCountFpIds), {
+                  headers: { "Content-Type": "application/json" }
+                });
+            }
+
             case "/get-state": {
                 // デバッグ用: 現在の状態を取得
                 return new Response(JSON.stringify(this.stateData), { headers: { 'Content-Type': 'application/json' } });
@@ -150,53 +183,63 @@ export async function generateFingerprint(request) {
 
   let fingerprintString = "";
 
-  // 1. User-Agent (必須)
-  fingerprintString += headers.get("User-Agent") || "";
-
+  // 1. User-Agent のコア部分 (揺れを吸収するために簡略化)
+  const ua = headers.get("User-Agent") || "";
+  // 例: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+  const uaMatch = ua.match(/(Chrome)\/(\d+)\./i); // Chrome/120
+  const osMatch = ua.match(/(Windows NT \d+\.\d+|Macintosh; Intel Mac OS X \d+_\d+_\d+|Linux)/i); // Windows NT 10.0, Mac OS X 10_15_7
+  
+  if (uaMatch && uaMatch[1] && uaMatch[2]) {
+      fingerprintString += `UA:${uaMatch[1]}-${uaMatch[2]}`; // 例: UA:Chrome-120
+  } else {
+      fingerprintString += `UA:${ua}`; // マッチしない場合は全体を使う (フォールバック)
+  }
+  if (osMatch && osMatch[0]) {
+      fingerprintString += `_OS:${osMatch[0].replace(/ /g, '_')}`; // 例: _OS:Macintosh;_Intel_Mac_OS_X_10_15_7
+  }
+  
   // 2. Accept ヘッダー群
-  fingerprintString += headers.get("Accept-Language") || "";
-  fingerprintString += headers.get("Accept-Encoding") || "";
-  fingerprintString += headers.get("Accept") || "";
+  fingerprintString += `|AL:${headers.get("Accept-Language") || ""}`;
+  fingerprintString += `|AE:${headers.get("Accept-Encoding") || ""}`;
+  fingerprintString += `|A:${headers.get("Accept") || ""}`;
 
-  // 3. Client Hints (存在すれば)
-  fingerprintString += headers.get("Sec-Ch-Ua") || "";
-  fingerprintString += headers.get("Sec-Ch-Ua-Mobile") || "";
-  fingerprintString += headers.get("Sec-Ch-Ua-Platform") || "";
+  // 3. Client Hints (存在すれば) - これらは非常に強力
+  fingerprintString += `|SCU:${headers.get("Sec-Ch-Ua") || ""}`;
+  fingerprintString += `|SCUM:${headers.get("Sec-Ch-Ua-Mobile") || ""}`;
+  fingerprintString += `||SCUP:${headers.get("Sec-Ch-Ua-Platform") || ""}`; // typo修正
 
-  // 4. Sec-Fetch ヘッダー群 (ブラウザが自動付与)
-  fingerprintString += headers.get("Sec-Fetch-Site") || "";
-  fingerprintString += headers.get("Sec-Fetch-Mode") || "";
-  fingerprintString += headers.get("Sec-Fetch-Dest") || "";
-  fingerprintString += headers.get("Sec-Fetch-User") || "";
+  // 4. Sec-Fetch ヘッダー群 - これらも強力
+  fingerprintString += `|SFS:${headers.get("Sec-Fetch-Site") || ""}`;
+  fingerprintString += `|SFM:${headers.get("Sec-Fetch-Mode") || ""}`;
+  fingerprintString += `|SFD:${headers.get("Sec-Fetch-Dest") || ""}`;
+  fingerprintString += `|SFU:${headers.get("Sec-Fetch-User") || ""}`;
 
   // 5. Referer (ある場合)
-  fingerprintString += headers.get("Referer") || "";
-
-  // 6. Cloudflare メタデータ (request.cf)
-  fingerprintString += cf.asn || "";       // AS番号
-  fingerprintString += cf.country || "";   // 国コード
-  fingerprintString += cf.city || "";      // 市町村
-  fingerprintString += cf.region || "";    // 地域コード
-  fingerprintString += cf.tlsCipher || ""; // TLS暗号スイート
-  fingerprintString += cf.tlsVersion || ""; // TLSバージョン
-  fingerprintString += cf.colo || ""; // データセンターコード (例: SIN, TYO)
-  fingerprintString += cf.timezone || ""; // タイムゾーン
-  fingerprintString += cf.longitude || ""; // 経度
-  fingerprintString += cf.latitude || "";  // 緯度
-  fingerprintString += cf.clientTcpRtt || ""; // TCP RTT
-  fingerprintString += cf.httpProtocol || ""; // HTTPプロトコル (HTTP/1.1, HTTP/2, HTTP/3)
-  fingerprintString += cf.tlsClientHelloLength || ""; // TLS Client Helloの長さ
-  fingerprintString += cf.tlsClientRandom || ""; // TLS Client Randomのハッシュ
-  fingerprintString += cf.tlsClientExtensionsSha1 || ""; // TLS Client ExtensionsのSHA1ハッシュ
+  fingerprintString += `|R:${headers.get("Referer") || ""}`;
+  fingerprintString += `|UIR:${headers.get("Upgrade-Insecure-Requests") || ""}`;
 
 
-  // 7. IPアドレスのサブネットの一部 (IPが変わっても同じネットワークからの可能性)
+  // 6. Cloudflare メタデータ (request.cf) - ネットワーク層の特性
+  fingerprintString += `|ASN:${cf.asn || ""}`;       // AS番号
+  fingerprintString += `|C:${cf.country || ""}`;   // 国コード
+  fingerprintString += `|TZ:${cf.timezone || ""}`;  // タイムゾーン
+
+  // TLS関連情報 - ボットが偽装しにくい低レベル情報
+  fingerprintString += `|TC:${cf.tlsCipher || ""}`; // TLS暗号スイート
+  fingerprintString += `|TV:${cf.tlsVersion || ""}`; // TLSバージョン
+  fingerprintString += `|TCHL:${cf.tlsClientHelloLength || ""}`; // TLS Client Helloの長さ
+  // ログにあるより詳細なTLSフィンガープリントも追加 (必要であれば)
+  fingerprintString += `|TCSR:${cf.tlsClientRandom || ""}`; // TLS Client Random
+  fingerprintString += `|TCE1:${cf.tlsClientExtensionsSha1 || ""}`; // TLS Client Extensions SHA1
+  fingerprintString += `|TCE1LE:${cf.tlsClientExtensionsSha1Le || ""}`; // TLS Client Extensions SHA1 LE
+
+  // IPアドレスのサブネットの一部 (フィンガープリントの安定性を損ねるが、サブネットレベルでの識別強化)
   const ip = headers.get("CF-Connecting-IP");
   if (ip) {
     if (ip.includes('.')) { // IPv4
-      fingerprintString += ip.split('.').slice(0, 3).join('.'); // 例: 192.168.1.x -> 192.168.1
+      fingerprintString += `|IPS:${ip.split('.').slice(0, 3).join('.')}`; // 例: 192.168.1.x -> 192.168.1
     } else if (ip.includes(':')) { // IPv6
-      fingerprintString += ip.split(':').slice(0, 4).join(':'); // 例: 2001:db8:abcd:1234:: -> 2001:db8:abcd:1234
+      fingerprintString += `|IPS6:${ip.split(':').slice(0, 4).join(':')}`; // 例: 2001:db8:abcd:1234:: -> 2001:db8:abcd:1234
     }
   }
 
