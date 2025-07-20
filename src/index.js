@@ -418,7 +418,6 @@ async function handle(request, env, ctx) {
       body: JSON.stringify({ path: url.pathname }) // アクセスパスを送信
     }));
 
-
     // どちらかのロケールチェックで違反が検知されたらブロック
     let violationDetected = false;
     let ipCount = 0;
