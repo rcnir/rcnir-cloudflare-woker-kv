@@ -27,6 +27,7 @@ function crc32(str) {
 }
 
 
+
 export class FingerprintTracker {
     constructor(state, env) {
         this.state = state;
