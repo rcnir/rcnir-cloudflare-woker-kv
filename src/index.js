@@ -289,7 +289,7 @@ async function handle(request, env, ctx) {
   if (refinedLabel === "[B]") { // UAでボットと判定された場合（SAFE_BOTはここで処理されない）
     if (learnedBadBotsCache === null) {
       const learnedList = await env.BOT_BLOCKER_KV.get("LEARNED_BAD_BOTS", { type: "json" });
-      learnedBadBotsCache = new Set(Array.isArray(learnedList) ? learnedList : []);
+      learnedBadBotsCache = new Set(Array.isArray(learnedList) ? Array.from(learnedList) : []); // Array.fromを追加してSetをコピー
     }
     for (const patt of learnedBadBotsCache) {
       if (new RegExp(patt, "i").test(ua)) {
@@ -542,7 +542,7 @@ async function verifyBotIp(ip, botKey, env) {
     botCidrsCache = await env.BOT_BLOCKER_KV.get("BOT_CIDRS", { type: "json", cacheTtl: 3600 });
   }
   const cidrs = botCidrsCache ? botCidrsCache[botKey] : null;
-  if (!cidrs || !ArrayisArray(cidrs) || cidrs.length === 0) {
+  if (!cidrs || !Array.isArray(cidrs) || cidrs.length === 0) {
     console.warn(`CIDR list for bot '${botKey}' is empty or not found in KV.`);
     return false;
   }
