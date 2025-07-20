@@ -1,15 +1,13 @@
-// src/do/FingerprintTracker.js
-
 // 設定可能な定数
 const RATE_LIMIT_WINDOW_MS = 10 * 1000; // 10秒
-const RATE_LIMIT_THRESHOLD = 5;       // 10秒間に5リクエスト以上で違反
+const RATE_LIMIT_THRESHOLD = 5;        // 10秒間に5リクエスト以上で違反
 
 const PATH_HISTORY_WINDOW_MS = 60 * 1000; // 60秒
-const PATH_HISTORY_THRESHOLD = 10;      // 60秒間に10個以上の異なるパスで違反
+const PATH_HISTORY_THRESHOLD = 10;       // 60秒間に10個以上の異なるパスで違反
 
 const LOCALE_WINDOW_MS = 10 * 1000; // ロケールファンアウトの判定ウィンドウ (10秒)
 const SINGLE_LOCALE_ACCESS_WINDOW_MS = 5 * 1000; // 5秒
-const SINGLE_LOCALE_ACCESS_THRESHOLD = 3;       // 5秒間に3回以上同じロケールにアクセスで違反 (既に履歴があるFP向け)
+const SINGLE_LOCALE_ACCESS_THRESHOLD = 3;        // 5秒間に3回以上同じロケールにアクセスで違反 (既に履歴があるFP向け)
 
 
 export class FingerprintTracker {
@@ -173,7 +171,7 @@ export class FingerprintTracker {
                     }
                 }
                 return new Response(JSON.stringify(highCountFpIds), {
-                  headers: { "Content-Type": "application/json" }
+                    headers: { "Content-Type": "application/json" }
                 });
             }
 
@@ -250,9 +248,9 @@ export async function generateFingerprint(request) {
 
   // 6. Cloudflare メタデータ (request.cf) - ネットワーク層の特性
   // ここで安定しているものだけを残す
-  fingerprintString += `|ASN:${cf.asn || ""}`;       // AS番号 (安定している)
-  fingerprintString += `|C:${cf.country || ""}`;   // 国コード (安定している)
-  fingerprintString += `|TZ:${cf.timezone || ""}`;  // タイムゾーン (安定している)
+  fingerprintString += `|ASN:${cf.asn || ""}`;    // AS番号 (安定している)
+  fingerprintString += `|C:${cf.country || ""}`;  // 国コード (安定している)
+  fingerprintString += `|TZ:${cf.timezone || ""}`; // タイムゾーン (安定している)
   fingerprintString += `|COLO:${cf.colo || ""}`; // データセンターコード (安定している)
   fingerprintString += `|HP:${cf.httpProtocol || ""}`; // HTTPプロトコル (安定している)
 
