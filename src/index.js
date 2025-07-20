@@ -100,9 +100,53 @@ export default {
 
 // --- 2. メインロジック ---
 async function handle(request, env, ctx) {
+  const url = new URL(request.url);
+
+  // ★★★ 変更開始: リセットエンドポイントをメインWorkerで直接処理する ★★★
+  const resetKey = url.searchParams.get("reset_key");
+
+  // IPStateTrackerの全データをリセット
+  if (url.pathname === "/admin/reset-all-violations") {
+    if (!env.DO_RESET_KEY || resetKey !== env.DO_RESET_KEY) {
+      return new Response("Unauthorized reset attempt.", { status: 401 });
+    }
+    // IPStateTracker の admin/reset-all-violations を呼び出す
+    // IPStateTracker には内部的に deleteAll を呼び出すエンドポイントが必要です
+    const ipStateTrackerStub = env.IP_STATE_TRACKER.idFromName("master-reset-key"); // 特定のマスターDO ID
+    const ipRes = await env.IP_STATE_TRACKER.get(ipStateTrackerStub).fetch(new Request("https://internal/admin/reset-all-violations", {
+        headers: {"X-Reset-Key": resetKey} // DO側で認証のためにキーを渡す
+    }));
+    
+    if (ipRes.ok) {
+        return new Response("All IP violation data has been reset.", { status: 200 });
+    } else {
+        return new Response(`Failed to reset IP violation data: ${ipRes.status} ${await ipRes.text()}`, { status: ipRes.status });
+    }
+  }
+
+  // FingerprintTrackerの全データをリセット
+  if (url.pathname === "/reset-state") {
+    if (!env.DO_RESET_KEY || resetKey !== env.DO_RESET_KEY) {
+      return new Response("Unauthorized reset attempt.", { status: 401 });
+    }
+    // FingerprintTrackerも同様に、マスターリセットDO IDにリセット要求を送る
+    // FingerprintTracker には内部的に deleteAll を呼び出すエンドポイントが必要です
+    const fpTrackerStub = env.FINGERPRINT_TRACKER.idFromName("master-reset-key"); // 特定のマスターDO ID
+    const fpRes = await env.FINGERPRINT_TRACKER.get(fpTrackerStub).fetch(new Request("https://internal/reset-state", {
+        headers: {"X-Reset-Key": resetKey} // DO側で認証のためにキーを渡す
+    }));
+
+    if (fpRes.ok) {
+        return new Response("All FingerprintTracker states have been reset.", { status: 200 });
+    } else {
+        return new Response(`Failed to reset FingerprintTracker data: ${fpRes.status} ${await fpRes.text()}`, { status: fpRes.status });
+    }
+  }
+  // ★★★ 変更終了 ★★★
+
+
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
-  const url = new URL(request.url);
   const path = url.pathname.toLowerCase();
   const fingerprint = await generateFingerprint(request); // FPは常に生成
 
@@ -133,7 +177,7 @@ async function handle(request, env, ctx) {
     }));
 
     if (res.ok) {
-        return new Response(await res.json(), { headers: { "Content-Type": "application/json" } });
+        return new Response(await res.json(), { headers: { 'Content-Type': 'application/json' } });
     } else {
         return new Response(`Failed to get FP state: ${res.status} ${await res.text()}`, { status: res.status });
     }
@@ -171,28 +215,51 @@ async function handle(request, env, ctx) {
     return logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint);
   }
 
-  // ★★★ 変更開始: UAベースの分類と有害Bot検知をアセットスキップより前に移動 ★★★
+  // ★★★ 変更開始: UAベースの分類と有害Bot検知の順序を調整 (SafeBotもここで判定) ★★★
   // AhrefsBot, PetalBot, Bingbotなどの公式ボットのUser-Agentをパターンに追加
-  const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot|ahrefsbot|mj12bot)/i; 
+  const botPattern = /\b(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot|ahrefsbot|mj12bot|crawler|scanner)\b/i; 
 
-  const label = botPattern.test(ua) ? "[B]" : "[H]";
+  let label = "[H]"; // デフォルトは人間
+  let refinedLabel = "[H]"; // 最終的なラベル
 
-  let refinedLabel = label; // 最終的な判定ラベル (B, TH, SH)
-
-  // ログに出力するために、Original UA/ASN/Country と Constructed String を保持する変数
-  // const originalUaForLog = ua; // デバッグ用、コメントアウト
-  // const originalAsnForLog = request.cf?.asn || "N/A"; // デバッグ用、コメントアウト
-  // const originalCountryForLog = request.cf?.country || "N/A"; // デバッグ用、コメントアウト
-  // const generatedFpForLog = fingerprint; // デバッグ用、コメントアウト
+  // FPTrackerのインスタンスもここで取得 (B判定でも必要になるため)
+  const ipTrackerId = env.IP_STATE_TRACKER.idFromName(ip);
+  const ipTrackerStub = env.IP_STATE_TRACKER.get(ipTrackerId);
+  const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint);
+  const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
 
 
-  if (label === "[H]") { // UAで人間と判定された場合のみTH/SH判定
-    const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint);
-    const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
+  // まずは明確なボットかセーフボットかを判定
+  if (botPattern.test(ua)) {
+      label = "[B]"; // まずはボットと仮判定
+      refinedLabel = "[B]";
 
-    // Durable ObjectからJS実行状態を取得
+      // セーフボットの中に含まれるかチェック
+      for (const safeBotPattern of safeBotPatterns) {
+          if (ua.includes(safeBotPattern)) {
+              // セーフボットはレート制限対象
+              const res = await ipTrackerStub.fetch(new Request("https://internal/rate-limit", {
+                  headers: {"CF-Connecting-IP": ip}
+              }));
+              if (res.ok) {
+                  const { allowed } = await res.json();
+                  if (!allowed) {
+                      console.log(`[RATE LIMIT] SafeBot (${safeBotPattern}) IP=${ip} blocked. (FP=${fingerprint})`);
+                      return new Response("Too Many Requests", { status: 429 });
+                  }
+              }
+              refinedLabel = "[SAFE_BOT]"; // 新しいラベルを導入して区別
+              // SAFE_BOTも早期リターンさせるので、ここで処理を終えることも可能だが、
+              // ログ出力のために下の共通ログまで処理を続ける
+              break; 
+          }
+      }
+  }
+
+
+  if (refinedLabel === "[H]") { // UAで人間と仮判定された場合のみTH/SH判定
     const fpStateRes = await fpTrackerStub.fetch(new Request("https://internal/get-state", {
-        headers: {"X-Fingerprint-ID": fingerprint} // FP用のDOにFPを渡す
+        headers: {"X-Fingerprint-ID": fingerprint}
     }));
 
     if (fpStateRes.ok) {
@@ -203,38 +270,22 @@ async function handle(request, env, ctx) {
             refinedLabel = "[SH]"; // 疑わしい人間 (Suspicious Human)
         }
     } else {
-        // DOからの状態取得に失敗した場合もSHとして扱うか、エラーログを出力
         console.error(`[DO_ERROR] Failed to get FP state for ${fingerprint}. Status: ${fpStateRes.status}. Treating as SH.`);
         refinedLabel = "[SH]"; // 安全のためSHとして扱う
     }
   }
   
-  // ★★★ 最終的なラベルを出力する場所をここに集約 + SHの場合のみ詳細ログ ★★★
+  // ★★★ 最終的なラベルを出力する場所をここに集約 ★★★
+  // SAFE_BOTもここでログに出力される
   console.log(`${refinedLabel} ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`);
 
-  // SHの場合のみ、追加の詳細FPデバッグログを出力
-  // if (refinedLabel === "[SH]") { // デバッグ用、コメントアウト
-  //   const cf = request.cf || {}; // デバッグ用、コメントアウト
-  //   const constructedString = `UA:${String(request.headers.get("User-Agent") || "UnknownUA").trim()}|ASN:${String(cf.asn || "UnknownASN").trim()}|C:${String(cf.country || "UnknownCountry").trim()}`; // デバッグ用、コメントアウト
-  //   console.log(`  (SH_DETAIL) Original UA: "${originalUaForLog}"`); // デバッグ用、コメントアウト
-  //   console.log(`  (SH_DETAIL) Original ASN: "${originalAsnForLog}", Original Country: "${originalCountryForLog}"`); // デバッグ用、コメントアウト
-  //   console.log(`  (SH_DETAIL) Constructed String: "${constructedString}" -> Generated FP: "${generatedFpForLog}"`); // デバッグ用、コメントアウト
-  // }
-
-
-  // THであれば、ここで処理を終了し、修正済みレスポンスを返す (パフォーマンス最適化)
-  if (refinedLabel === "[TH]") {
+  // THまたはSAFE_BOTであれば、ここで処理を終了し、修正済みレスポンスを返す (パフォーマンス最適化)
+  if (refinedLabel === "[TH]" || refinedLabel === "[SAFE_BOT]") { 
     return fetch(request);
   }
 
-  // --- 有害Bot検知＋ペナルティ (ラベルは refinedLabel を使用) ---
-  // このブロック全体をアセットスキップより前に移動
-  const ipTrackerId = env.IP_STATE_TRACKER.idFromName(ip);
-  const ipTrackerStub = env.IP_STATE_TRACKER.get(ipTrackerId);
-  const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint);
-  const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
-
-  if (refinedLabel === "[B]") { // UAでボットと判定された場合
+  // --- 有害Bot検知＋ペナルティ (ラベルがBの場合の処理) ---
+  if (refinedLabel === "[B]") { // UAでボットと判定された場合（SAFE_BOTはここで処理されない）
     if (learnedBadBotsCache === null) {
       const learnedList = await env.BOT_BLOCKER_KV.get("LEARNED_BAD_BOTS", { type: "json" });
       learnedBadBotsCache = new Set(Array.isArray(learnedList) ? learnedList : []);
@@ -246,7 +297,7 @@ async function handle(request, env, ctx) {
           headers: {"CF-Connecting-IP": ip}
         }));
         const fpRes = await fpTrackerStub.fetch(new Request("https://internal/track-violation", {
-          headers: {"X-Fingerprint-ID": fingerprint} // FP_TRACKERにフィンガープリントIDを渡す
+          headers: {"X-Fingerprint-ID": fingerprint}
         }));
 
         if (ipRes.ok && fpRes.ok) {
@@ -293,27 +344,12 @@ async function handle(request, env, ctx) {
 
   // ★★★ 変更終了 ★★★
   // safeBotPatterns も B判定に含めるため移動
-  const safeBotPatterns = ["PetalBot"];
-  for (const safeBotPattern of safeBotPatterns) {
-    if (ua.includes(safeBotPattern)) {
-      const id = env.IP_STATE_TRACKER.idFromName(ip);
-      const stub = env.IP_STATE_TRACKER.get(id);
-      const res = await stub.fetch(new Request("https://internal/rate-limit", {
-        headers: {"CF-Connecting-IP": ip}
-      }));
-      if (res.ok) {
-        const { allowed } = await res.json();
-        if (!allowed) {
-          console.log(`[RATE LIMIT] SafeBot (${safeBotPattern}) IP=${ip} blocked. (FP=${fingerprint})`);
-          return new Response("Too Many Requests", { status: 429 });
-        }
-      }
-      return fetch(request);
-    }
-  }
+  const safeBotPatterns = ["PetalBot"]; // PetalBotは安全だがレート制限対象
+  // 上記のif (botPattern.test(ua))ブロック内でrefinedLabelをSAFE_BOTに設定済みのため、
+  // ここでのsafeBotPatternsの処理は不要。その代わり、SAFE_BOTも早期リターンするように修正済み。
+  // そのため、このsafeBotPatternsのループは削除します。
 
-
-  // --- 4. アssetファイルならそのまま返す（JSピクセル検出は残す） ---
+  // --- 4. アセットファイルならそのまま返す（JSピクセル検出は残す） ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/; // JSファイルもスキップ対象に含める
   // Shopify MonorailのようなJSピクセルもここに含まれる
   if (EXT_SKIP.test(path)) {
@@ -383,7 +419,7 @@ async function handle(request, env, ctx) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({ path: url.pathname }) // アクセスパスを送信
-    })));
+    }));
 
 
     // どちらかのロケールチェックで違反が検知されたらブロック
