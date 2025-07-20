@@ -3,6 +3,7 @@ name = "shopify-bot-blocker"
 account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
 compatibility_date = "2025-07-18"
+type = "module" # ★この行が重要です。追加してください。★
 
 # workers_dev = true # テスト用
 
