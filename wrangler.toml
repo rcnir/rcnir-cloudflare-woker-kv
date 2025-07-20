@@ -34,8 +34,3 @@ tag = "v5_add_fingerprint_tracker_sqlite" # 新しいマイグレーションの
 # new_classes の代わりに new_sqlite_classes を使用
 new_sqlite_classes = ["FingerprintTracker"] # 新たにDurable Objectとして登録するクラス名 (SQLite対応)
 
-[build] # ★このセクションを新しく追加します★
-# type = "module" の代わりに `upload.format = "modules"` を使用します。
-# `main` フィールドでエントリーポイントを指定している場合、
-# Wranglerは通常自動でESMと判断しますが、明示的に指定することでより確実になります。
-upload.format = "modules" 
