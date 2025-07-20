@@ -220,7 +220,7 @@ async function handle(request, env, ctx) {
   const safeBotPatterns = ["PetalBot"]; // PetalBotは安全だがレート制限対象
 
   // AhrefsBot, PetalBot, Bingbotなどの公式ボットのUser-Agentをパターンに追加
-  const botPattern = /\b(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot|ahrefsbot|mj12bot|crawler|scanner)\b/i; 
+  const botPattern = /\b((?:google|bing|petal|ahrefs|mj12)?bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|crawler|scanner)\b/i;
 
   let label = "[H]"; // デフォルトは人間
   let refinedLabel = "[H]"; // 最終的なラベル
