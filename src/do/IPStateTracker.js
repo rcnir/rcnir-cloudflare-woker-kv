@@ -18,9 +18,9 @@ export class IPStateTracker {
     this.env = env;
 
     // --- 検知ルール設定 ---
-    this.LOCALE_WINDOW_MS = 10 * 1000;         // 10秒
-    this.RATE_LIMIT_COUNT = 10;                // 10リクエストまで許容
-    this.RATE_LIMIT_DURATION_MS = 60 * 1000;   // 1分間
+    this.LOCALE_WINDOW_MS = 10 * 1000;      // 10秒
+    this.RATE_LIMIT_COUNT = 10;            // 10リクエストまで許容
+    this.RATE_LIMIT_DURATION_MS = 60 * 1000;  // 1分間
   }
 
   /*
@@ -132,7 +132,7 @@ async handleLocaleCheck(ip, path) {
 
   // --- ✅ 除外対象パス (既存) ---
   const excludePatterns = [
-    '^/\\.well-known/',         // Shopify Monorail 等
+    '^/\\.well-known/',          // Shopify Monorail 等
     '^/sf_private_access_tokens', // プライベートトークンAPI
     // ここに必要に応じて追加可能
   ];
