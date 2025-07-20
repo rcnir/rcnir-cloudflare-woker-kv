@@ -219,6 +219,10 @@ async function handle(request, env, ctx) {
   // PetalBotはsafeBotPatternsに属するため、botPatternの定義の前に移動
   const safeBotPatterns = ["PetalBot"]; // PetalBotは安全だがレート制限対象
   const botPattern = /\b(\w+bot|bot|crawl(er)?|spider|slurp|fetch|headless|preview|agent|scanner|client|curl|wget|python|perl|java|scrape(r)?|monitor|probe|archive|validator|feed)\b/i;
+  // ★★★ この一行を追加してください ★★★
+  const isBotTest = botPattern.test(ua);
+  console.log(`[DIAGNOSTIC] UA: "${ua}" | Pattern Test Result: ${isBotTest}`);
+  // ★★★ 診断コードここまで ★★★  
   let label = "[H]"; // デフォルトは人間
   let refinedLabel = "[H]"; // 最終的なラベル
 
