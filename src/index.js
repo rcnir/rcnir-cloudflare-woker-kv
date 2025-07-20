@@ -232,24 +232,28 @@ async function handle(request, env, ctx, logBuffer) {
 
   // --- 有害Bot検知 (ラベルがBの場合) ---
   if (refinedLabel === "[B]") {
+    // 学習済み有害Botリストのチェック
     if (learnedBadBotsCache === null) {
       const learnedList = await env.BOT_BLOCKER_KV.get("LEARNED_BAD_BOTS", { type: "json" });
       learnedBadBotsCache = new Set(Array.isArray(learnedList) ? learnedList : []);
     }
     for (const patt of learnedBadBotsCache) {
-      if (new RegExp(patt, "i").test(ua)) {
+      const flexiblePatt = patt.replace(/^\^|\$$/g, '');
+      if (new RegExp(flexiblePatt, "i").test(ua)) {
         const reason = `unwanted-bot(learned):${patt}`;
         ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
         return new Response("Not Found", { status: 404 });
       }
     }
     
+    // 新規有害Bot辞書のチェック
     if (badBotDictionaryCache === null) {
       const object = await env.BLOCKLIST_R2.get("dictionaries/bad-bots.txt");
       badBotDictionaryCache = object ? (await object.text()).split('\n').filter(line => line && !line.startsWith('#')) : [];
     }
     for (const patt of badBotDictionaryCache) {
-      if (new RegExp(patt, "i").test(ua)) {
+      const flexiblePatt = patt.replace(/^\^|\$$/g, ''); 
+      if (new RegExp(flexiblePatt, "i").test(ua)) {
         const reason = `unwanted-bot(new):${patt}`;
         logBuffer.push(`[LEARNED] New bad bot pattern: ${patt}`);
         learnedBadBotsCache.add(patt);
@@ -320,7 +324,6 @@ async function handle(request, env, ctx, logBuffer) {
   // --- 全チェッククリア ---
   return fetch(request);
 }
-
 
 // --- 3. コアヘルパー関数 ---
 
