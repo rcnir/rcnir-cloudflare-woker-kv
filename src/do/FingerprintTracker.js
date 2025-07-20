@@ -48,7 +48,7 @@ export class FingerprintTracker {
 
     async fetch(request) {
         const url = new URL(request.url);
-        const now = Date.Now(); // typo修正: Date.now()
+        const now = Date.now(); // typo修正: Date.now()
         // typo修正: Date.now() をローカルのnow変数に再定義
         const localNow = Date.now();
 
