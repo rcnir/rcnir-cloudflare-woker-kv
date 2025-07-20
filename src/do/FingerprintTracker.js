@@ -43,14 +43,16 @@ export class FingerprintTracker {
             pathHistory: [], // { path: string, timestamp: number }[]
             lastResetTime: now, // レート制限のリセット時間
 
-            // ★追加: JS実行フラグ ★
+            // JS実行フラグ
             jsExecuted: false,
         };
     }
 
     async fetch(request) {
         const url = new URL(request.url);
-        const now = Date.now();
+        const now = Date.Now(); // typo修正: Date.now()
+        // typo修正: Date.now() をローカルのnow変数に再定義
+        const localNow = Date.now();
 
         // 状態がまだロードされていなければロード
         if (!this.stateData) {
@@ -85,13 +87,13 @@ export class FingerprintTracker {
                 // 既存の複数ロケール検知ロジック (国セットのサイズで判断)
                 this.stateData.lgRegions = this.stateData.lgRegions || {}; // stateDataにlgRegionsがなければ初期化
                 for (const [key, ts] of Object.entries(this.stateData.lgRegions)) {
-                    if (now - ts > LOCALE_WINDOW_MS) {
+                    if (localNow - ts > LOCALE_WINDOW_MS) { // localNowを使用
                         delete this.stateData.lgRegions[key];
                     }
                 }
 
                 const currentLocaleKey = `${lang}-${country}`;
-                this.stateData.lgRegions[currentLocaleKey] = now; // 最新のロケールアクセスを記録
+                this.stateData.lgRegions[currentLocaleKey] = localNow; // 最新のロケールアクセスを記録 (localNowを使用)
 
                 const countries = new Set(Object.keys(this.stateData.lgRegions).map(k => k.split("-")[1]));
                 if (countries.size >= 2) { // 複数国にまたがるアクセス
@@ -103,9 +105,9 @@ export class FingerprintTracker {
                 
                 // 既存違反履歴がある場合の単一ロケール連続アクセス検知
                 if (this.stateData.count >= 1 && !violationDetected) {
-                    if (this.stateData.singleLocaleAccess.locale !== currentLocaleKey || now - this.stateData.singleLocaleAccess.firstAccess > SINGLE_LOCALE_ACCESS_WINDOW_MS) {
+                    if (this.stateData.singleLocaleAccess.locale !== currentLocaleKey || localNow - this.stateData.singleLocaleAccess.firstAccess > SINGLE_LOCALE_ACCESS_WINDOW_MS) { // localNowを使用
                         // ロケールが変わったか、ウィンドウを過ぎたらリセット
-                        this.stateData.singleLocaleAccess = { count: 1, firstAccess: now, locale: currentLocaleKey };
+                        this.stateData.singleLocaleAccess = { count: 1, firstAccess: localNow, locale: currentLocaleKey }; // localNowを使用
                     } else {
                         // 同じロケールで連続アクセス
                         this.stateData.singleLocaleAccess.count++;
@@ -130,9 +132,9 @@ export class FingerprintTracker {
                 const { path } = await request.json();
 
                 // 1. レート制限のチェックと更新 (高速アクセス検知)
-                if (now - this.stateData.lastResetTime > RATE_LIMIT_WINDOW_MS) {
+                if (localNow - this.stateData.lastResetTime > RATE_LIMIT_WINDOW_MS) { // localNowを使用
                     this.stateData.requestCount = 0;
-                    this.stateData.lastResetTime = now;
+                    this.stateData.lastResetTime = localNow; // localNowを使用
                 }
                 this.stateData.requestCount++;
                 if (this.stateData.requestCount > RATE_LIMIT_THRESHOLD) {
@@ -141,8 +143,8 @@ export class FingerprintTracker {
                 }
 
                 // 2. パス履歴の追跡と不自然な遷移のチェック (多岐にわたるパスアクセス検知)
-                this.stateData.pathHistory.push({ path, timestamp: now });
-                this.stateData.pathHistory = this.stateData.pathHistory.filter(entry => now - entry.timestamp < PATH_HISTORY_WINDOW_MS);
+                this.stateData.pathHistory.push({ path, timestamp: localNow }); // localNowを使用
+                this.stateData.pathHistory = this.stateData.pathHistory.filter(entry => localNow - entry.timestamp < PATH_HISTORY_WINDOW_MS); // localNowを使用
 
                 const uniquePaths = new Set(this.stateData.pathHistory.map(entry => entry.path));
                 if (uniquePaths.size > PATH_HISTORY_THRESHOLD) {
@@ -150,7 +152,7 @@ export class FingerprintTracker {
                     this.stateData.count++; // 違反カウント増加
                 }
 
-                this.stateData.lastAccessTime = now;
+                this.stateData.lastAccessTime = localNow; // localNowを使用
                 await this.state.storage.put("state", this.stateData); // 状態を永続化
 
                 return new Response(JSON.stringify({
@@ -181,9 +183,7 @@ export class FingerprintTracker {
                 return new Response(JSON.stringify(this.stateData), { headers: { 'Content-Type': 'application/json' } });
             }
 
-            case "/record-js-execution": { // ★追加: JS実行を記録するエンドポイント
-                // このフィンガープリントIDがJSを実行したことを記録
-                // 認証を追加することを強く推奨（例: 内部リクエストなので不要な場合もあるが、念のため）
+            case "/record-js-execution": { // JS実行を記録するエンドポイント
                 this.stateData.jsExecuted = true;
                 await this.state.storage.put("state", this.stateData);
                 console.log(`[FP_JS_EXEC] FP=${this.state.id.toString()} has executed JS.`);
@@ -192,7 +192,6 @@ export class FingerprintTracker {
 
             case "/reset-state": {
                 // フィンガープリントIDのデータをリセットするエンドポイント
-                // ★★★ 認証を必ず追加すること！ ★★★
                 const resetKey = url.searchParams.get("reset_key");
                 if (!this.env.DO_RESET_KEY || resetKey !== this.env.DO_RESET_KEY) {
                   return new Response("Unauthorized reset attempt.", { status: 401 });
@@ -216,7 +215,7 @@ export async function generateFingerprint(request) {
 
   // 1. User-Agent のコア部分 (揺れを吸収するために簡略化)
   const ua = headers.get("User-Agent") || "";
-  const uaMatch = ua.match(/(Chrome)\/(\d+)\./i); // Chrome/120
+  const uaMatch = ua.match(/(Chrome|Firefox)\/(\d+)\./i); // Chrome/120
   const osMatch = ua.match(/(Windows NT \d+\.\d+|Macintosh; Intel Mac OS X \d+_\d+_\d+|Linux)/i); // Windows NT 10.0, Mac OS X 10_15_7
   
   if (uaMatch && uaMatch[1] && uaMatch[2]) {
