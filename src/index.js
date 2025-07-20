@@ -73,53 +73,63 @@ export default {
 async function handle(request, env, ctx) {
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
+  const url = new URL(request.url);
+  const path = url.pathname.toLowerCase();
 
-  // --- 1. Cookieベースのホワイトリストチェック (最優先) ---
+  // 🔧 **デバッグ用：KVに保存された全ブロックIPを取得**
+  if (url.pathname === "/debug/list-blocked-ips") {
+    let cursor = undefined;
+    const allKeys = [];
+    do {
+      const listResult = await env.BOT_BLOCKER_KV.list({ limit: 1000, cursor });
+      allKeys.push(...listResult.keys.map(k => k.name));
+      cursor = listResult.list_complete ? undefined : listResult.cursor;
+    } while (cursor);
+    return new Response(JSON.stringify(allKeys), {
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
+  // --- 1. Cookieホワイトリスト（最優先） ---
   const cookieHeader = request.headers.get("Cookie") || "";
   if (cookieHeader.includes("secret-pass=Rocaniru-Admin-Bypass-XYZ789")) {
     console.log(`[WHITELIST] Access granted via secret cookie for IP=${ip}.`);
     return fetch(request);
   }
 
-  const { pathname } = new URL(request.url);
-  const path = pathname.toLowerCase();
-
   // --- 2. KVブロックリストチェック ---
   const status = await env.BOT_BLOCKER_KV.get(ip, { cacheTtl: 300 });
-  if (status === "permanent-block" || status === "temp-1" || status === "temp-2" || status === "temp-3") {
+  if (["permanent-block", "temp-1", "temp-2", "temp-3"].includes(status)) {
     console.log(`[KV BLOCK] IP=${ip} status=${status}`);
     return new Response("Not Found", { status: 404 });
   }
 
-  // --- 3. 静的ルールによるブロック ---
+  // --- 3. 静的ルールによるパス探索型攻撃ブロック ---
   if (path.includes("/wp-") || path.endsWith(".php") || path.includes("/phpmyadmin") ||
       path.endsWith("/.env") || path.endsWith("/config") || path.includes("/admin/") ||
       path.includes("/dbadmin")) {
     return logAndBlock(ip, ua, "path-scan", env, ctx);
   }
 
-  // --- 4. アセットファイルのスキップ ---
+  // --- 4. アセットファイルならそのまま ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
   if (EXT_SKIP.test(path)) {
     return fetch(request);
   }
 
-  // --- 5. ログ用の分類と、安全なボットのレート制限 ---
+  // --- 5. UAベースの分類と、安全Botのレート制御 ---
   const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
   const label = botPattern.test(ua) ? "[B]" : "[H]";
   console.log(`${label} ${request.url} IP=${ip} UA=${ua}`);
 
-  // レート制限をかけたい「安全なボット」のリスト
-  const safeBotPatterns = [
-    "PetalBot",
-    // 他にレート制限したいボットがあれば、将来ここにカンマ区切りで追加
-  ];
-
+  const safeBotPatterns = ["PetalBot"];
   for (const safeBotPattern of safeBotPatterns) {
     if (ua.includes(safeBotPattern)) {
       const id = env.IP_STATE_TRACKER.idFromName(ip);
       const stub = env.IP_STATE_TRACKER.get(id);
-      const res = await stub.fetch(new Request("https://internal/rate-limit", { headers: { "CF-Connecting-IP": ip } }));
+      const res = await stub.fetch(new Request("https://internal/rate-limit", {
+        headers: {"CF-Connecting-IP": ip}
+      }));
       if (res.ok) {
         const { allowed } = await res.json();
         if (!allowed) {
@@ -127,18 +137,16 @@ async function handle(request, env, ctx) {
           return new Response("Too Many Requests", { status: 429 });
         }
       }
-      // レート制限内で許可された場合は、ここで処理を終了
       return fetch(request);
     }
   }
 
-  // --- 6. 各種動的ルールの適用 ---
+  // --- 6. 動的ルール実行（Bot／Human別） ---
   const id = env.IP_STATE_TRACKER.idFromName(ip);
   const stub = env.IP_STATE_TRACKER.get(id);
 
-  // 有害ボット([B])の学習とブロック
+  // 有害Bot検知＋ペナルティ
   if (label === "[B]") {
-    // ステップ1：学習済みリスト（KV）に載っているか確認
     if (learnedBadBotsCache === null) {
       const learnedList = await env.BOT_BLOCKER_KV.get("LEARNED_BAD_BOTS", { type: "json" });
       learnedBadBotsCache = new Set(Array.isArray(learnedList) ? learnedList : []);
@@ -146,7 +154,9 @@ async function handle(request, env, ctx) {
     for (const patt of learnedBadBotsCache) {
       if (new RegExp(patt, "i").test(ua)) {
         const reason = `unwanted-bot(learned):${patt}`;
-        const res = await stub.fetch(new Request("https://internal/trigger-violation", { headers: { "CF-Connecting-IP": ip } }));
+        const res = await stub.fetch(new Request("https://internal/trigger-violation", {
+          headers: {"CF-Connecting-IP": ip}
+        }));
         if (res.ok) {
           const { count } = await res.json();
           await handleViolationSideEffects(ip, ua, reason, count, env, ctx);
@@ -154,66 +164,71 @@ async function handle(request, env, ctx) {
         return new Response("Not Found", { status: 404 });
       }
     }
-
-    // ステップ2：辞書（R2）と照合して、新しい有害ボットか判断
     if (badBotDictionaryCache === null) {
-        const object = await env.BLOCKLIST_R2.get("dictionaries/bad-bots.txt");
-        if (object !== null) {
-            const dictionaryText = await object.text();
-            badBotDictionaryCache = dictionaryText.split('\n').filter(line => line && !line.startsWith('#'));
-        } else { badBotDictionaryCache = []; }
+      const object = await env.BLOCKLIST_R2.get("dictionaries/bad-bots.txt");
+      badBotDictionaryCache = object
+        ? (await object.text()).split('\n').filter(line => line && !line.startsWith('#'))
+        : [];
     }
     for (const patt of badBotDictionaryCache) {
-        if (new RegExp(patt, "i").test(ua)) {
-            const reason = `unwanted-bot(new):${patt}`;
-            console.log(`[LEARNED] New bad bot pattern: ${patt}`);
-            learnedBadBotsCache.add(patt);
-            ctx.waitUntil(env.BOT_BLOCKER_KV.put("LEARNED_BAD_BOTS", JSON.stringify(Array.from(learnedBadBotsCache))));
-            const res = await stub.fetch(new Request("https://internal/trigger-violation", { headers: { "CF-Connecting-IP": ip } }));
-            if (res.ok) {
-                const { count } = await res.json();
-                await handleViolationSideEffects(ip, ua, reason, count, env, ctx);
-            }
-            return new Response("Not Found", { status: 404 });
+      if (new RegExp(patt, "i").test(ua)) {
+        const reason = `unwanted-bot(new):${patt}`;
+        console.log(`[LEARNED] New bad bot pattern: ${patt}`);
+        learnedBadBotsCache.add(patt);
+        ctx.waitUntil(env.BOT_BLOCKER_KV.put("LEARNED_BAD_BOTS", JSON.stringify(Array.from(learnedBadBotsCache))));
+        const res = await stub.fetch(new Request("https://internal/trigger-violation", {
+          headers: {"CF-Connecting-IP": ip}
+        }));
+        if (res.ok) {
+          const { count } = await res.json();
+          await handleViolationSideEffects(ip, ua, reason, count, env, ctx);
         }
+        return new Response("Not Found", { status: 404 });
+      }
     }
   }
 
-  // [H]人間の異常行動検知
+  // Humanアクセス：国跨ぎ言語切替による不正検知
   if (label === "[H]") {
     const res = await stub.fetch(new Request("https://internal/check-locale", {
       method: 'POST',
-      headers: { "CF-Connecting-IP": ip, "Content-Type": "application/json" },
-      body: JSON.stringify({ path })  // ← path をそのまま送る
+      headers: {
+        "CF-Connecting-IP": ip,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ path })  // pathをそのまま送信
     }));
     if (res.ok) {
-        const { violation, count } = await res.json();
-        if (violation) {
-            await handleViolationSideEffects(ip, ua, "locale-fanout", count, env, ctx);
-            return new Response("Not Found", { status: 404 });
-        }
+      const { violation, count } = await res.json();
+      if (violation) {
+        await handleViolationSideEffects(ip, ua, "locale-fanout", count, env, ctx);
+        return new Response("Not Found", { status: 404 });
+      }
     } else {
-        console.error(`DO /check-locale failed for IP=${ip}. Status: ${res.status}`);
+      console.error(`DO /check-locale failed for IP=${ip}. Status: ${res.status}`);
     }
   }
 
-  // Amazonボットの偽装チェック
+  // Amazon Botなりすましチェック
   if (ua.startsWith("AmazonProductDiscovery/1.0")) {
     const isVerified = await verifyBotIp(ip, "amazon", env);
     if (!isVerified) {
       const reason = "amazon-impersonation";
-      const res = await stub.fetch(new Request("https://internal/trigger-violation", { headers: { "CF-Connecting-IP": ip } }));
-      if(res.ok) {
+      const res = await stub.fetch(new Request("https://internal/trigger-violation", {
+        headers: {"CF-Connecting-IP": ip}
+      }));
+      if (res.ok) {
         const { count } = await res.json();
         await handleViolationSideEffects(ip, ua, reason, count, env, ctx);
       }
       return new Response("Not Found", { status: 404 });
     }
   }
-  
-  // --- 7. 全てのチェックを通過 ---
+
+  // --- 7. 全チェッククリア → 正常アクセス処理へ ---
   return fetch(request);
 }
+
 
 
 // --- 3. コアヘルパー関数 ---
