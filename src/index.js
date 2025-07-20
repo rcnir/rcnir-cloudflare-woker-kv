@@ -11,7 +11,6 @@
  * 7. parseLocale: パスから言語・国を抽出（特例含む）
  * =================================================================
  */
-
 export class IPStateTracker {
   constructor(state, env) {
     this.state = state;
