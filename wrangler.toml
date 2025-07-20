@@ -30,5 +30,6 @@ bindings = [
 ]
 # ★★★ ここに新しいマイグレーションを追加します ★★★
 [[migrations]]
-tag = "v5_add_fingerprint_tracker" # 新しいマイグレーションの一意なタグ
-new_classes = ["FingerprintTracker"] # 新たにDurable Objectとして登録するクラス名
+tag = "v5_add_fingerprint_tracker_sqlite" # 新しいマイグレーションの一意なタグ (例: 日付やバージョンで区別)
+# new_classes の代わりに new_sqlite_classes を使用
+new_sqlite_classes = ["FingerprintTracker"] # 新たにDurable Objectとして登録するクラス名 (SQLite対応)
