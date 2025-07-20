@@ -63,36 +63,36 @@ export default {
     const res = await stub.fetch(new Request("https://internal/list-high-count")); // IP_STATE_TRACKERから高カウントIPを取得
     if (!res.ok) {
       console.error(`Failed to fetch high count IPs from DO. Status: ${res.status}`);
-      return;
-    }
-    const ipsToBlock = await res.json();
-    if (ipsToBlock && ipsToBlock.length > 0) {
-      const promises = ipsToBlock.map(ip => env.BOT_BLOCKER_KV.put(ip, "permanent-block"));
-      await Promise.all(promises);
-      console.log(`Synced ${ipsToBlock.length} permanent block IPs to KV.`);
+      // エラー時でもFP同期は試行する
     } else {
-      console.log("No new IPs to permanently block.");
+      const ipsToBlock = await res.json();
+      if (ipsToBlock && ipsToBlock.length > 0) {
+        const promises = ipsToBlock.map(ip => env.BOT_BLOCKER_KV.put(ip, "permanent-block"));
+        await Promise.all(promises);
+        console.log(`Synced ${ipsToBlock.length} permanent block IPs to KV.`);
+      } else {
+        console.log("No new IPs to permanently block.");
+      }
     }
 
-    // ★変更: FingerprintTrackerから高カウントフィンガープリントを取得し、KVに同期★
-    // Note: FP_TRACKERのlist-high-count-fpは、sync-job-fpという特定のIDのDOインスタンスが
-    // FP全体のサマリーを持つという前提が必要。あるいは各FP-IDのDOインスタンスをすべてスキャンするロジックが必要。
-    // 現状はFP_TRACKERのsync-job-fpが空のFP-IDリストを返す可能性があります。
-    // 必要に応じてこの同期ロジックを調整します。
-    const fpSyncId = env.FINGERPRINT_TRACKER.idFromName("sync-job-fp");
-    const fpStub = env.FINGERPRINT_TRACKER.get(fpSyncId);
-    const fpRes = await fpStub.fetch(new Request("https://internal/list-high-count-fp")); // FingerprintTrackerから高カウントFPを取得
-    if (!fpRes.ok) {
-      console.error(`Failed to fetch high count Fingerprints from DO. Status: ${fpRes.status}`);
-      return;
-    }
-    const fpsToBlock = await fpRes.json();
-    if (fpsToBlock && fpsToBlock.length > 0) {
-      const promises = fpsToBlock.map(fp => env.BOT_BLOCKER_KV.put(`FP-${fp}`, "permanent-block")); // KVキーに "FP-" プレフィックス
-      await Promise.all(promises);
-      console.log(`Synced ${fpsToBlock.length} permanent block Fingerprints to KV.`);
+    // ★変更: FingerprintTrackerから高カウントフィンガープリントを直接KVから取得し同期★
+    let cursor = undefined;
+    const allHighCountFpKeys = [];
+    do {
+        const listResult = await env.BOT_BLOCKER_KV.list({ prefix: "FP-HIGH-COUNT-", limit: 1000, cursor });
+        allHighCountFpKeys.push(...listResult.keys.map(k => k.name.replace("FP-HIGH-COUNT-", "")));
+        cursor = listResult.list_complete ? undefined : listResult.cursor;
+    } while (cursor);
+
+    if (allHighCountFpKeys && allHighCountFpKeys.length > 0) {
+        const promises = allHighCountFpKeys.map(fp => env.BOT_BLOCKER_KV.put(`FP-${fp}`, "permanent-block"));
+        await Promise.all(promises);
+        console.log(`Synced ${allHighCountFpKeys.length} permanent block Fingerprints to KV.`);
+        // KVから一時的な"FP-HIGH-COUNT-"エントリを削除
+        const deletePromises = allHighCountFpKeys.map(fp => env.BOT_BLOCKER_KV.delete(`FP-HIGH-COUNT-${fp}`));
+        await Promise.all(deletePromises);
     } else {
-      console.log("No new Fingerprints to permanently block.");
+        console.log("No new Fingerprints to permanently block.");
     }
   }
 };
@@ -104,28 +104,7 @@ async function handle(request, env, ctx) {
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
   const url = new URL(request.url);
   const path = url.pathname.toLowerCase();
-
-  // ★変更: リクエストからフィンガープリントを生成★
   const fingerprint = await generateFingerprint(request);
-
-  // ★★★ 変更: H判定の場合のみ詳細ログを出力（デバッグ用） ★★★
-  // このデバッグログは、フィンガープリント選定が完了したら削除してください。
-  const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i;
-  const tempLabelForDebug = botPattern.test(ua) ? "[B]" : "[H]";
-  if (tempLabelForDebug === "[H]") {
-    console.log("--- New Request Details (H-labeled) ---");
-    console.log("URL:", request.url);
-    console.log("Method:", request.method);
-    console.log("Headers:");
-    for (let [key, value] of request.headers) {
-        console.log(`  ${key}: ${value}`);
-    }
-    console.log("Request.cf:");
-    console.log(JSON.stringify(request.cf, null, 2));
-    console.log("--- End Request Details (H-labeled) ---");
-  }
-  // ★★★ 変更ここまで ★★★
-
 
   // 🔧 **デバッグ用：KVに保存された全ブロックIP/FPを取得**
   if (url.pathname === "/debug/list-blocked-ips") {
@@ -192,28 +171,104 @@ async function handle(request, env, ctx) {
     return logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint);
   }
 
-  // --- 4. アセットファイルならそのまま ---
+  // --- HTMLレスポンスに対するJS実行トラッカー挿入の新しいロジック ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
+  const botPattern = /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|bingbot|petalbot)/i; // UA分類用
+
+  const isHtmlRequest = !EXT_SKIP.test(path) && request.headers.get("Accept")?.includes("text/html");
+
+  // まずはオリジンからのレスポンスを取得
+  let originalResponse = await fetch(request);
+  let finalResponse = originalResponse; // デフォルトではオリジナルレスポンスを使用
+
+  // HTMLリクエストかつ成功レスポンスの場合のみ、HTMLにスクリプトを挿入
+  if (isHtmlRequest && originalResponse.ok && originalResponse.headers.get("Content-Type")?.includes("text/html")) {
+      try {
+          const originalHtml = await originalResponse.text();
+          const jsTrackerScript = `
+              <script>
+              // Durable ObjectにJS実行を通知
+              // パフォーマンスを考慮し、Monorailのように非同期でfire-and-forget
+              fetch('/internal/record-js-execution-from-html', {
+                  method: 'POST',
+                  headers: {
+                      'Content-Type': 'application/json',
+                      'X-Fingerprint-ID': '${fingerprint}'
+                  },
+                  body: JSON.stringify({ timestamp: Date.now() })
+              }).catch(e => console.warn('Failed to report JS execution from HTML:', e));
+              </script>
+          `;
+          // </body>の直前にスクリプトを挿入
+          const modifiedHtml = originalHtml.replace('</body>', `${jsTrackerScript}</body>`);
+          // 新しいResponseオブジェクトを生成し、Content-Lengthを削除してCloudflareに再計算させる
+          finalResponse = new Response(modifiedHtml, {
+              status: originalResponse.status,
+              statusText: originalResponse.statusText,
+              headers: originalResponse.headers
+          });
+          finalResponse.headers.delete('Content-Length');
+      } catch (e) {
+          console.error(`[HTML_MODIFY_ERROR] Failed to modify HTML for FP=${fingerprint}:`, e);
+          // HTML変更に失敗しても元のレスポンスを返す
+          finalResponse = originalResponse;
+      }
+  }
+
+
+  // --- 4. アセットファイルならそのまま返す（JSピクセル検出は残す） ---
+  // Shopify MonorailのようなJSピクセルもここに含まれる
   if (EXT_SKIP.test(path)) {
-    // ★変更: JSピクセルリクエストの検出と記録 ★
-    // MonorailのようなShopifyのJSピクセルもここに含まれる
     const monorailPixelPattern = /^\/\.well-known\/shopify\/monorail\//;
     if (monorailPixelPattern.test(path)) {
-        const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint);
-        const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
-        
-        // JSが実行されたことをDurable Objectに記録 (非同期)
-        ctx.waitUntil(fpTrackerStub.fetch(new Request("https://internal/record-js-execution", {
-            method: 'POST',
-            headers: { "X-Fingerprint-ID": fingerprint } // FP用のDOにFPを渡す
-        })));
+      const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint);
+      const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
+      // JSが実行されたことをDurable Objectに記録 (非同期)
+      ctx.waitUntil(fpTrackerStub.fetch(new Request("https://internal/record-js-execution", {
+        method: 'POST',
+        headers: { "X-Fingerprint-ID": fingerprint } // FP用のDOにFPを渡す
+      })));
     }
-    return fetch(request);
+    return finalResponse; // ★変更: HTML変更後のレスポンスを返す
   }
 
   // --- 5. UAベースの分類と、安全Botのレート制御 ---
-  const label = botPattern.test(ua) ? "[B]" : "[H]"; // 既存のUAベース分類
-  console.log(`${label} ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`); // FPログ追加
+  const label = botPattern.test(ua) ? "[B]" : "[H]";
+  // console.log(`${label} ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`); // このログは最終判定で出力するためコメントアウト
+
+  let refinedLabel = label; // 最終的な判定ラベル (B, TH, SH)
+
+  if (label === "[H]") { // UAで人間と判定された場合のみTH/SH判定
+    const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint); // ★変更: フィンガープリントベースのDO
+    const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId); // ★変更★
+
+    // Durable ObjectからJS実行状態を取得
+    const fpStateRes = await fpTrackerStub.fetch(new Request("https://internal/get-state", {
+        headers: {"X-Fingerprint-ID": fingerprint} // FP用のDOにFPを渡す
+    }));
+
+    if (fpStateRes.ok) {
+        const fpState = await fpStateRes.json();
+        if (fpState.jsExecuted) {
+            refinedLabel = "[TH]"; // 本物の人間 (Trusted Human)
+        } else {
+            refinedLabel = "[SH]"; // 疑わしい人間 (Suspicious Human)
+        }
+    } else {
+        // DOからの状態取得に失敗した場合もSHとして扱うか、エラーログを出力
+        console.error(`[DO_ERROR] Failed to get FP state for ${fingerprint}. Status: ${fpStateRes.status}. Treating as SH.`);
+        refinedLabel = "[SH]"; // 安全のためSHとして扱う
+    }
+  }
+  
+  // ★★★ 最終的なラベルを出力する場所をここに集約 ★★★
+  console.log(`${refinedLabel} ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`);
+
+
+  // THであれば、ここで処理を終了し、修正済みレスポンスを返す (パフォーマンス最適化)
+  if (refinedLabel === "[TH]") {
+    return finalResponse;
+  }
 
 
   const safeBotPatterns = ["PetalBot"];
@@ -233,7 +288,7 @@ async function handle(request, env, ctx) {
           return new Response("Too Many Requests", { status: 429 });
         }
       }
-      return fetch(request);
+      return finalResponse; // ★変更: HTML変更後のレスポンスを返す
     }
   }
 
@@ -244,35 +299,6 @@ async function handle(request, env, ctx) {
 
   const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint); // ★変更: フィンガープリントベースのDO
   const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId); // ★変更★
-
-
-  // ★★★ 変更: H判定の2分化 (TH/SH) と、それに基づくロジックの適用 ★★★
-  let refinedLabel = label; // 最終的な判定ラベル (B, TH, SH)
-
-  if (label === "[H]") { // UAで人間と判定された場合のみTH/SH判定
-    // Durable ObjectからJS実行状態を取得
-    const fpStateRes = await fpTrackerStub.fetch(new Request("https://internal/get-state", {
-        headers: {"X-Fingerprint-ID": fingerprint} // FP用のDOにFPを渡す
-    }));
-
-    if (fpStateRes.ok) {
-        const fpState = await fpStateRes.json();
-        if (fpState.jsExecuted) {
-            refinedLabel = "[TH]"; // 本物の人間 (Trusted Human)
-            console.log(`[TH] ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`);
-            // THであれば、以下の動的ルール実行（ロケールチェック、行動追跡）をスキップすることも可能
-            // 例: return fetch(request); // ここで処理を終了し、オリジンへ転送 (パフォーマンス最適化)
-        } else {
-            refinedLabel = "[SH]"; // 疑わしい人間 (Suspicious Human)
-            console.log(`[SH] ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`);
-        }
-    } else {
-        // DOからの状態取得に失敗した場合もSHとして扱うか、エラーログを出力
-        console.error(`[DO_ERROR] Failed to get FP state for ${fingerprint}. Status: ${fpStateRes.status}. Treating as SH.`);
-        refinedLabel = "[SH]"; // 安全のためSHとして扱う
-    }
-  }
-  // ★★★ 変更ここまで ★★★
 
 
   // 有害Bot検知＋ペナルティ (ラベルは refinedLabel を使用)
@@ -340,17 +366,8 @@ async function handle(request, env, ctx) {
   }
 
   // Humanアクセス（THまたはSH）に対する動的ルール実行
-  // THは原則スキップ、SHのみ詳細チェック
-  if (refinedLabel === "[H]" || refinedLabel === "[TH]" || refinedLabel === "[SH]") { //念のため全てのH判定を含める
-    // ★★★ 変更: THの場合はロケールチェックと行動追跡をスキップ ★★★
-    if (refinedLabel === "[TH]") {
-        // THは既に安全と判断されているため、追加の動的ルールはスキップし、そのまま通過させる
-        // console.log(`[INFO] TH user ${ip} (${fingerprint}) bypassed dynamic rules.`); // デバッグログ
-        return fetch(request);
-    }
-    // ★★★ 変更ここまで ★★★
-
-    // 以下のロジックは refinedLabel が "[SH]" の場合にのみ実行される
+  // THは原則スキップされるので、SHの場合にのみ実行される
+  if (refinedLabel === "[SH]") {
     // ロケールチェックもIPとフィンガープリントの両方で実施する
     const ipLocaleRes = await ipTrackerStub.fetch(new Request("https://internal/check-locale", {
       method: 'POST',
@@ -371,7 +388,7 @@ async function handle(request, env, ctx) {
     }));
 
     // ★★★ 変更: 行動パターン追跡のためのDO呼び出し ★★★
-    // THはスキップされるので、SHまたはBの場合にのみ実行される
+    // SHの場合にのみ実行される
     ctx.waitUntil(fpTrackerStub.fetch(new Request("https://internal/track-behavior", {
       method: 'POST',
       headers: {
@@ -443,7 +460,7 @@ async function handle(request, env, ctx) {
   }
 
   // --- 7. 全チェッククリア → 正常アクセス処理へ ---
-  return fetch(request);
+  return finalResponse; // ★変更: HTML変更後のレスポンスを返す
 }
 
 
@@ -488,6 +505,8 @@ async function handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fin
     });
     // R2のオブジェクト名もIPとFPを組み合わせるなどして一意性を高める
     ctx.waitUntil(env.BLOCKLIST_R2.put(`${ip}-${fingerprint.substring(0, 8)}-${Date.now()}.json`, record));
+    // KVに高カウントFPとして登録
+    ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-HIGH-COUNT-${fingerprint}`, "pending-permanent-block", { expirationTtl: 3600 * 24 }));
   }
 }
 
@@ -514,18 +533,6 @@ async function verifyBotIp(ip, botKey, env) {
 
 
 // --- 4. ユーティリティ関数 ---
-
-// この関数はIPStateTracker.js にも存在するため、重複に注意。
-// もし両方で必要なら、共有のutils.jsファイルに移動するのがベストプラクティス。
-// 今回はFingerprintTracker.js に parseLocale を含めたため、ここでは削除または使わない
-/*
-function extractLocale(path) {
-  const seg = path.split('/').filter(Boolean)[0];
-  if (!seg) return 'root';
-  if (/^[a-z]{2}(-[a-z]{2})?$/.test(seg)) return seg;
-  return 'root';
-}
-*/
 
 function ipToBigInt(ip) {
   if (ip.includes(':')) { // IPv6
