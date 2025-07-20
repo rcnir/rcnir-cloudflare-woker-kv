@@ -1,5 +1,213 @@
-// src/do/FingerprintTracker.js (generateFingerprint 関数のみ修正)
+// src/do/FingerprintTracker.js
 
+// 設定可能な定数
+const RATE_LIMIT_WINDOW_MS = 10 * 1000; // 10秒
+const RATE_LIMIT_THRESHOLD = 5;       // 10秒間に5リクエスト以上で違反
+
+const PATH_HISTORY_WINDOW_MS = 60 * 1000; // 60秒
+const PATH_HISTORY_THRESHOLD = 10;      // 60秒間に10個以上の異なるパスで違反
+
+const LOCALE_WINDOW_MS = 10 * 1000; // ロケールファンアウトの判定ウィンドウ (10秒)
+const SINGLE_LOCALE_ACCESS_WINDOW_MS = 5 * 1000; // 5秒
+const SINGLE_LOCALE_ACCESS_THRESHOLD = 3;       // 5秒間に3回以上同じロケールにアクセスで違反 (既に履歴があるFP向け)
+
+
+export class FingerprintTracker {
+    constructor(state, env) {
+        this.state = state;
+        this.env = env;
+        this.stateData = null; // 初期化はfetch内で非同期で行う
+
+        // コンストラクタで初期状態をロード (fetchでの初回アクセスでロードする方式も可)
+        this.state.blockConcurrencyWhile(async () => {
+            this.stateData = (await this.state.storage.get("state")) || this._getInitialState();
+        });
+    }
+
+    _getInitialState() {
+        const now = Date.now();
+        return {
+            count: 0, // 全体の累積違反カウント (Main WorkerのeffectiveCountに影響)
+            localeViolationCount: 0, // ロケールに関する違反カウント
+            lastLocale: null, // 前回のアクセスロケール
+            lastLocaleTime: 0, // 前回のロケールアクセス時刻
+            singleLocaleAccess: { // 1ロケール連続アクセス検知用
+                count: 0,
+                firstAccess: 0,
+                locale: ''
+            },
+            
+            // 行動パターン検知用
+            lastAccessTime: 0, // 最終アクセス時刻
+            requestCount: 0, // 短期間のリクエストカウント
+            pathHistory: [], // { path: string, timestamp: number }[]
+            lastResetTime: now, // レート制限のリセット時間
+
+            // ★追加: JS実行フラグ ★
+            jsExecuted: false,
+        };
+    }
+
+    async fetch(request) {
+        const url = new URL(request.url);
+        const now = Date.now();
+
+        // 状態がまだロードされていなければロード
+        if (!this.stateData) {
+            this.stateData = await this.state.storage.get("state") || this._getInitialState();
+        }
+
+        // 内部APIエンドポイントの処理
+        switch (url.pathname) {
+            case "/track-violation": {
+                // 外部（メインWorker）から明示的に違反が通知された場合のロジック (例: UAベースの既知のボット検知)
+                this.stateData.count++; // 違反カウント増加
+                await this.state.storage.put("state", this.stateData);
+                return new Response(JSON.stringify({ count: this.stateData.count }), { headers: { 'Content-Type': 'application/json' } });
+            }
+
+            case "/check-locale-fp": {
+                // フィンガープリントIDベースのロケールファンアウトチェック
+                const { path } = await request.json(); // メインWorkerからpathを受信
+
+                const { lang, country } = parseLocale(path);
+
+                // 'unknown'なロケールは処理対象外とする (システムパスなど)
+                if (lang === "unknown" || country === "unknown") {
+                    await this.state.storage.put("state", this.stateData); // 状態を保存（アクセス時刻の更新など）
+                    return new Response(JSON.stringify({ violation: false, count: this.stateData.localeViolationCount }), {
+                        headers: { "Content-Type": "application/json" }
+                    });
+                }
+
+                let violationDetected = false;
+                
+                // 既存の複数ロケール検知ロジック (国セットのサイズで判断)
+                this.stateData.lgRegions = this.stateData.lgRegions || {}; // stateDataにlgRegionsがなければ初期化
+                for (const [key, ts] of Object.entries(this.stateData.lgRegions)) {
+                    if (now - ts > LOCALE_WINDOW_MS) {
+                        delete this.stateData.lgRegions[key];
+                    }
+                }
+
+                const currentLocaleKey = `${lang}-${country}`;
+                this.stateData.lgRegions[currentLocaleKey] = now; // 最新のロケールアクセスを記録
+
+                const countries = new Set(Object.keys(this.stateData.lgRegions).map(k => k.split("-")[1]));
+                if (countries.size >= 2) { // 複数国にまたがるアクセス
+                    violationDetected = true;
+                    this.stateData.localeViolationCount++; // ロケール違反カウント増加
+                    this.stateData.count++; // 全体カウントも増加
+                    this.stateData.lgRegions = {}; // 違反時は履歴をリセット
+                }
+                
+                // 既存違反履歴がある場合の単一ロケール連続アクセス検知
+                if (this.stateData.count >= 1 && !violationDetected) {
+                    if (this.stateData.singleLocaleAccess.locale !== currentLocaleKey || now - this.stateData.singleLocaleAccess.firstAccess > SINGLE_LOCALE_ACCESS_WINDOW_MS) {
+                        // ロケールが変わったか、ウィンドウを過ぎたらリセット
+                        this.stateData.singleLocaleAccess = { count: 1, firstAccess: now, locale: currentLocaleKey };
+                    } else {
+                        // 同じロケールで連続アクセス
+                        this.stateData.singleLocaleAccess.count++;
+                    }
+
+                    if (this.stateData.singleLocaleAccess.count > SINGLE_LOCALE_ACCESS_THRESHOLD) {
+                        console.log(`[FP_BEHAVIOR_VIOLATION] High single locale access rate for FP: ${this.stateData.singleLocaleAccess.count} in ${SINGLE_LOCALE_ACCESS_WINDOW_MS/1000}s`);
+                        violationDetected = true;
+                        this.stateData.localeViolationCount++; // ロケール違反カウント増加
+                        this.stateData.count++; // 全体カウントも増加
+                        this.stateData.singleLocaleAccess = { count: 0, firstAccess: 0, locale: '' }; // リセット
+                    }
+                }
+
+                await this.state.storage.put("state", this.stateData); // 状態を保存
+
+                return new Response(JSON.stringify({ violation: violationDetected, count: this.stateData.localeViolationCount }), { headers: { 'Content-Type': 'application/json' } });
+            }
+
+            case "/track-behavior": {
+                // フィンガープリントIDごとの行動パターン追跡と違反検知ロジック
+                const { path } = await request.json();
+
+                // 1. レート制限のチェックと更新 (高速アクセス検知)
+                if (now - this.stateData.lastResetTime > RATE_LIMIT_WINDOW_MS) {
+                    this.stateData.requestCount = 0;
+                    this.stateData.lastResetTime = now;
+                }
+                this.stateData.requestCount++;
+                if (this.stateData.requestCount > RATE_LIMIT_THRESHOLD) {
+                    console.log(`[FP_BEHAVIOR_VIOLATION] High request rate for FP. Requests in window: ${this.stateData.requestCount}`);
+                    this.stateData.count++; // 違反カウント増加
+                }
+
+                // 2. パス履歴の追跡と不自然な遷移のチェック (多岐にわたるパスアクセス検知)
+                this.stateData.pathHistory.push({ path, timestamp: now });
+                this.stateData.pathHistory = this.stateData.pathHistory.filter(entry => now - entry.timestamp < PATH_HISTORY_WINDOW_MS);
+
+                const uniquePaths = new Set(this.stateData.pathHistory.map(entry => entry.path));
+                if (uniquePaths.size > PATH_HISTORY_THRESHOLD) {
+                    console.log(`[FP_BEHAVIOR_VIOLATION] Too many unique paths for FP. Unique paths: ${uniquePaths.size}`);
+                    this.stateData.count++; // 違反カウント増加
+                }
+
+                this.stateData.lastAccessTime = now;
+                await this.state.storage.put("state", this.stateData); // 状態を永続化
+
+                return new Response(JSON.stringify({
+                    count: this.stateData.count, // FP全体の違反カウント
+                    requestCount: this.stateData.requestCount,
+                    uniquePaths: uniquePaths.size
+                }), { headers: { 'Content-Type': 'application/json' } });
+            }
+
+            case "/list-high-count-fp": {
+                // Cron Triggerから呼び出され、高カウントのFPをリストアップするエンドポイント
+                const data = await this.state.storage.list({ limit: 10000 });
+                const highCountFpIds = [];
+                for (const [key, state] of data.entries()) {
+                    if (key === "state" && state && state.count >= 4) {
+                        const fpIdFromDO = this.state.id.toString();
+                        highCountFpIds.push(fpIdFromDO);
+                    }
+                }
+                return new Response(JSON.stringify(highCountFpIds), {
+                  headers: { "Content-Type": "application/json" }
+                });
+            }
+
+            case "/get-state": {
+                // デバッグ用: 現在の状態を取得
+                // JS実行フラグも返す
+                return new Response(JSON.stringify(this.stateData), { headers: { 'Content-Type': 'application/json' } });
+            }
+
+            case "/record-js-execution": { // ★追加: JS実行を記録するエンドポイント
+                // このフィンガープリントIDがJSを実行したことを記録
+                // 認証を追加することを強く推奨（例: 内部リクエストなので不要な場合もあるが、念のため）
+                this.stateData.jsExecuted = true;
+                await this.state.storage.put("state", this.stateData);
+                console.log(`[FP_JS_EXEC] FP=${this.state.id.toString()} has executed JS.`);
+                return new Response("JS execution recorded.", { status: 200 });
+            }
+
+            case "/reset-state": {
+                // フィンガープリントIDのデータをリセットするエンドポイント
+                // ★★★ 認証を必ず追加すること！ ★★★
+                const resetKey = url.searchParams.get("reset_key");
+                if (!this.env.DO_RESET_KEY || resetKey !== this.env.DO_RESET_KEY) {
+                  return new Response("Unauthorized reset attempt.", { status: 401 });
+                }
+                await this.state.storage.deleteAll();
+                console.log(`[FP_RESET] Fingerprint ID data reset.`);
+                return new Response("Fingerprint data reset successfully.", { status: 200 });
+            }
+            default:
+                return new Response("Not found", { status: 404 });
+        }
+    }
+}
+
+// フィンガープリントを生成する関数 (Durable Object クラスの外に定義)
 export async function generateFingerprint(request) {
   const headers = request.headers;
   const cf = request.cf || {}; // request.cf オブジェクト
@@ -28,7 +236,7 @@ export async function generateFingerprint(request) {
   // 3. Client Hints (存在すれば) - これらは非常に強力
   fingerprintString += `|SCU:${headers.get("Sec-Ch-Ua") || ""}`;
   fingerprintString += `|SCUM:${headers.get("Sec-Ch-Ua-Mobile") || ""}`;
-  fingerprintString += `|SCUP:${headers.get("Sec-Ch-Ua-Platform") || ""}`; // typo修正済み
+  fingerprintString += `|SCUP:${headers.get("Sec-Ch-Ua-Platform") || ""}`;
 
   // 4. Sec-Fetch ヘッダー群 - これらも強力
   fingerprintString += `|SFS:${headers.get("Sec-Fetch-Site") || ""}`;
@@ -49,25 +257,24 @@ export async function generateFingerprint(request) {
   fingerprintString += `|COLO:${cf.colo || ""}`; // データセンターコード (安定している)
   fingerprintString += `|HP:${cf.httpProtocol || ""}`; // HTTPプロトコル (安定している)
 
-  // ★★★ 修正: 常に揺れるTLS関連の項目を除外 ★★★
-  // fingerprintString += `|TC:${cf.tlsCipher || ""}`; // TLS暗号スイート (今回は一致しているが、今後揺れる可能性)
-  // fingerprintString += `|TV:${cf.tlsVersion || ""}`; // TLSバージョン (今回は一致しているが、今後揺れる可能性)
-  // fingerprintString += `|TCHL:${cf.tlsClientHelloLength || ""}`; // 常に揺れる
-  // fingerprintString += `|TCSR:${cf.tlsClientRandom || ""}`; // 常に揺れる
-  // fingerprintString += `|TCE1:${cf.tlsClientExtensionsSha1 || ""}`; // 常に揺れる
-  // fingerprintString += `|TCE1LE:${cf.tlsClientExtensionsSha1Le || ""}`; // 常に揺れる
+  // TLS関連の項目や、クライアント側のTCP/地理情報など、常に変動する可能性のあるものは除外
+  /*
+  fingerprintString += cf.tlsCipher || ""; // TLS暗号スイート
+  fingerprintString += cf.tlsVersion || ""; // TLSバージョン
+  fingerprintString += cf.tlsClientHelloLength || ""; // 常に揺れる
+  fingerprintString += cf.tlsClientRandom || ""; // 常に揺れる
+  fingerprintString += cf.tlsClientCiphersSha1 || ""; // 常に揺れる
+  fingerprintString += cf.tlsClientExtensionsSha1 || ""; // 常に揺れる
+  fingerprintString += cf.tlsClientExtensionsSha1Le || ""; // 常に揺れる
+  fingerprintString += cf.clientTcpRtt || "";
+  fingerprintString += cf.longitude || "";
+  fingerprintString += cf.latitude || "";
+  fingerprintString += cf.city || "";
+  fingerprintString += cf.region || "";
+  fingerprintString += cf.postalCode || "";
+  */
 
-  // ★★★ 修正: クライアント側のTCP/地理情報など、リクエストごと、位置ごとに変動する可能性のあるものを除外 ★★★
-  // fingerprintString += cf.clientTcpRtt || "";
-  // fingerprintString += cf.longitude || "";
-  // fingerprintString += cf.latitude || "";
-  // fingerprintString += cf.city || "";
-  // fingerprintString += cf.region || "";
-  // fingerprintString += cf.postalCode || "";
-
-
-  // 7. IPアドレスのサブネットの一部 (安定性を損なうため、FPからは除外)
-  // これらはBAD_BOT_IDの生成に使うのが適切
+  // IPアドレスのサブネットの一部 (フィンガープリントの安定性を損なうため、FPからは除外)
   /*
   const ip = headers.get("CF-Connecting-IP");
   if (ip) {
@@ -83,7 +290,7 @@ export async function generateFingerprint(request) {
   const encoder = new TextEncoder();
   const data = encoder.encode(fingerprintString);
   const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8ToArray(hashBuffer));
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
   const fingerprint = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 
   return fingerprint;
