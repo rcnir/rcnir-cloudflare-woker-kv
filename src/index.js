@@ -144,12 +144,24 @@ async function handle(request, env, ctx, logBuffer) {
     return fetch(request);
   }
 
-  // --- 3. 静的ルールによるパス探索型攻撃ブロック ---
-  if (path.includes("/wp-") || path.endsWith(".php") || path.includes("/phpmyadmin") ||
-      path.endsWith("/.env") || path.endsWith("/config") || path.includes("/admin/") ||
-      path.includes("/dbadmin")) {
-    return logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint, logBuffer);
-  }
+// --- 3. 静的ルールによるパス探索型攻撃ブロック ---
+const staticBlockPatterns = [
+  "/wp-",      // WordPress関連
+  ".php",      // PHPファイル全般
+  "phpinfo",   // phpinfoスキャン
+  "phpmyadmin",// phpMyAdminスキャン
+  "/.env",     // 環境設定ファイル
+  "/config",   // 設定ファイル
+  "/admin/",   // 管理画面
+  "/dbadmin",  // DB管理画面
+  "/_profiler",// デバッグツール
+  ".aws",      // AWS認証情報
+  "credentials"// 認証情報
+];
+// 上記パターンのいずれかがパスに含まれていたらブロック
+if (staticBlockPatterns.some(patt => path.includes(patt))) {
+  return logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint, logBuffer);
+}
 
   // --- 4. UAベースの分類 ---
   const safeBotPatterns = ["PetalBot"];
