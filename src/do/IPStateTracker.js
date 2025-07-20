@@ -30,7 +30,7 @@ export class IPStateTracker {
    */
   async fetch(request) {
     const url = new URL(request.url);
-    const ip = request.headers.get("CF-Connecting-IP");
+    const ip = request.headers.get("CF-Connecting-IP"); // このIPはリクエスト元IPであり、DOのIDとは異なる
 
     switch (url.pathname) {
       case "/check-locale": {
@@ -44,17 +44,40 @@ export class IPStateTracker {
         return this.handleRateLimit(ip);
       }
       case "/list-high-count": {
-        const data = await this.state.storage.list({ limit: 1000 });
+        // DOのストレージにある全てのキー（IPアドレス）とその状態を取得
+        // limit を設定しないと、デフォルトの1000件で打ち切られる場合があるため、明示的に大きな値を設定
+        const data = await this.state.storage.list({ limit: 10000 });
         const highCountIps = [];
-        for (const [ip, state] of data.entries()) {
+        for (const [key, state] of data.entries()) {
+          // state が存在し、かつ count >= 4 の場合のみ抽出
           if (state && state.count >= 4) {
-            highCountIps.push(ip);
+            highCountIps.push(key); // キー自体がIPアドレス
           }
         }
         return new Response(JSON.stringify(highCountIps), {
           headers: { "Content-Type": "application/json" }
         });
       }
+      // --- DOストレージをリセットする管理者用エンドポイント ---
+      // !! 認証を追加することを強く推奨します !!
+      // 例: `wrangler.toml` で設定した `DO_RESET_KEY` を利用
+      // `npx wrangler deploy` 時には `env.DO_RESET_KEY` が注入されます。
+      // ただし、このメソッドは個々のDurable Objectインスタンスのストレージをリセットするものです。
+      // 全てのIPのDurable Objectインスタンスをリセットしたい場合は、
+      // `wrangler.toml` のDurable Objectバインディングを削除・再作成するのが最も確実です。
+      case "/admin/reset-all-violations": {
+        const resetKey = url.searchParams.get("reset_key"); // URLのクエリパラメータからキーを取得
+
+        // 環境変数 'DO_RESET_KEY' と比較して認証
+        if (!this.env.DO_RESET_KEY || resetKey !== this.env.DO_RESET_KEY) {
+          return new Response("Unauthorized reset attempt.", { status: 401 });
+        }
+
+        await this.state.storage.deleteAll(); // **Durable Objectの永続ストレージを全削除**
+        console.log("Durable Object storage for this instance has been reset.");
+        return new Response("Durable Object storage reset successfully.", { status: 200 });
+      }
+
       default:
         return new Response("Not found", { status: 404 });
     }
@@ -109,8 +132,8 @@ async handleLocaleCheck(ip, path) {
 
   // --- ✅ 除外対象パス ---
   const excludePatterns = [
-    '^/\\.well-known/',        // Shopify Monorail 等
-    '^/sf_private_access_tokens'  // プライベートトークンAPI
+    '^/\\.well-known/',         // Shopify Monorail 等
+    '^/sf_private_access_tokens' // プライベートトークンAPI
     // ここに必要に応じて追加可能
   ];
   for (const pat of excludePatterns) {
