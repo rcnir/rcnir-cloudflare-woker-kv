@@ -207,15 +207,19 @@ export async function generateFingerprint(request) {
 
     let fpParts = [];
 
-    // --- フィンガープリントのコア要素 ---
+    // --- 既存のフィンガープリント要素 ---
     fpParts.push(`UA:${String(headers.get("User-Agent") || "UnknownUA").trim()}`);
     fpParts.push(`ASN:${String(cf.asn || "UnknownASN").trim()}`);   
     fpParts.push(`C:${String(cf.country || "UnknownCountry").trim()}`);  
-
-    // ★★★ 修正案: ヘッダー情報を追加してフィンガープリントの精度を向上 ★★★
     fpParts.push(`AL:${String(headers.get("Accept-Language") || "N/A").trim()}`);
     fpParts.push(`SCP:${String(headers.get("Sec-Ch-Ua-Platform") || "N/A").trim()}`);
-    // ★★★ 修正案ここまで ★★★
+
+    // ★★★ ここから下を追加 ★★★
+    // JA3フィンガープリントの要素を追加して精度を最大化
+    fpParts.push(`TC:${String(cf.tlsCipher || "N/A").trim()}`);
+    fpParts.push(`TV:${String(cf.tlsVersion || "N/A").trim()}`);
+    fpParts.push(`TCS:${String(cf.tlsClientCiphersSha1 || "N/A").trim()}`);
+    // ★★★ ここまで追加 ★★★
 
     // --- ハッシュ化 ---
     const fingerprintString = fpParts.join('|');
