@@ -23,11 +23,11 @@ binding = "BLOCKLIST_R2"
 bucket_name = "rocaniiru-log"
 
 # Durable Object (名前とクラス名を変更)
-# ここをコメントアウトするか、bindings = [] に変更
 [durable_objects]
 bindings = [
-   { name = "IP_STATE_TRACKER", class_name = "IPStateTracker" }
- ]
+  { name = "IP_STATE_TRACKER", class_name = "IPStateTracker" },
+  { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTracker" } # ★ この行を追加してください ★
+]
 
 # Migration (v3に更新)
 [[migrations]]
