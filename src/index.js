@@ -218,10 +218,7 @@ async function handle(request, env, ctx) {
   // ★★★ 変更開始: UAベースの分類と有害Bot検知の順序を調整 (SafeBotもここで判定) ★★★
   // PetalBotはsafeBotPatternsに属するため、botPatternの定義の前に移動
   const safeBotPatterns = ["PetalBot"]; // PetalBotは安全だがレート制限対象
-
-  // AhrefsBot, PetalBot, Bingbotなどの公式ボットのUser-Agentをパターンに追加
-  const botPattern = /\b((?:google|bing|petal|ahrefs|mj12)?bot|crawl|spider|slurp|fetch|headless|preview|externalagent|barkrowler|crawler|scanner)\b/i;
-
+  const botPattern = /\b(\w+bot|bot|crawl(er)?|spider|slurp|fetch|headless|preview|agent|scanner|client|curl|wget|python|perl|java|scrape(r)?|monitor|probe|archive|validator|feed)\b/i;
   let label = "[H]"; // デフォルトは人間
   let refinedLabel = "[H]"; // 最終的なラベル
 
