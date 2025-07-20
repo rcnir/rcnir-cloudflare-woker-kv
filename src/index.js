@@ -104,9 +104,6 @@ async function handle(request, env, ctx, logBuffer) {
 
   // 管理エンドポイントの処理
   if (url.pathname.startsWith("/admin/") || url.pathname.startsWith("/reset-state") || url.pathname.startsWith("/debug/")) {
-    // This is a simplified handler for admin/debug endpoints.
-    // They are not part of the grouped logging and don't undergo security checks.
-    // You can add more complex logic here if needed.
     return new Response(`Admin/Debug endpoint accessed: ${url.pathname}`, { status: 200 });
   }
 
@@ -134,7 +131,7 @@ async function handle(request, env, ctx, logBuffer) {
     return new Response("Not Found", { status: 404 });
   }
 
-  // --- ASNブロックリストチェック ---
+  // --- 3. ASNブロックリストチェック ---
   const asn = request.cf?.asn;
   if (asn) {
     if (asnBlocklistCache === null) {
@@ -147,7 +144,20 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
 
-  // --- アセットファイルのスキップ処理 ---
+  // ★ 新機能: bad-bots.txtによる即時ブロック ★
+  if (badBotDictionaryCache === null) {
+    const object = await env.BLOCKLIST_R2.get("dictionaries/bad-bots.txt");
+    badBotDictionaryCache = object ? (await object.text()).split('\n').filter(line => line && !line.startsWith('#')) : [];
+  }
+  for (const patt of badBotDictionaryCache) {
+    const flexiblePatt = patt.replace(/^\^|\$$/g, '');
+    if (new RegExp(flexiblePatt, "i").test(ua)) {
+      logBuffer.push(`[BAD BOT BLOCK] UA matched list rule: ${patt}`);
+      return new Response("Forbidden", { status: 403 });
+    }
+  }
+
+  // --- 4. アセットファイルのスキップ処理 ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
   if (EXT_SKIP.test(path)) {
     const importantJsPatterns = [
@@ -172,7 +182,7 @@ async function handle(request, env, ctx, logBuffer) {
     return fetch(request);
   }
 
-  // --- 静的ルールによるパス探索型攻撃ブロック ---
+  // --- 5. 静的ルールによるパス探索型攻撃ブロック ---
   const staticBlockPatterns = [
     "/wp-", ".php", "phpinfo", "phpmyadmin", "/.env", "/config", "/admin/",
     "/dbadmin", "/_profiler", ".aws", "credentials"
@@ -181,7 +191,7 @@ async function handle(request, env, ctx, logBuffer) {
     return logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint, logBuffer);
   }
 
-  // --- UAベースの分類 ---
+  // --- 6. UAベースの分類 ---
   const safeBotPatterns = ["PetalBot"];
   const botPattern = /\b(\w+bot|bot|crawl(er)?|spider|slurp|fetch|headless|preview|agent|scanner|client|curl|wget|python|perl|java|scrape(r)?|monitor|probe|archive|validator|feed)\b/i;
   
@@ -230,9 +240,8 @@ async function handle(request, env, ctx, logBuffer) {
     return fetch(request);
   }
 
-  // --- 有害Bot検知 (ラベルがBの場合) ---
+  // --- 7. 有害Bot検知（学習済みリスト） ---
   if (refinedLabel === "[B]") {
-    // 学習済み有害Botリストのチェック
     if (learnedBadBotsCache === null) {
       const learnedList = await env.BOT_BLOCKER_KV.get("LEARNED_BAD_BOTS", { type: "json" });
       learnedBadBotsCache = new Set(Array.isArray(learnedList) ? learnedList : []);
@@ -245,26 +254,9 @@ async function handle(request, env, ctx, logBuffer) {
         return new Response("Not Found", { status: 404 });
       }
     }
-    
-    // 新規有害Bot辞書のチェック
-    if (badBotDictionaryCache === null) {
-      const object = await env.BLOCKLIST_R2.get("dictionaries/bad-bots.txt");
-      badBotDictionaryCache = object ? (await object.text()).split('\n').filter(line => line && !line.startsWith('#')) : [];
-    }
-    for (const patt of badBotDictionaryCache) {
-      const flexiblePatt = patt.replace(/^\^|\$$/g, ''); 
-      if (new RegExp(flexiblePatt, "i").test(ua)) {
-        const reason = `unwanted-bot(new):${patt}`;
-        logBuffer.push(`[LEARNED] New bad bot pattern: ${patt}`);
-        learnedBadBotsCache.add(patt);
-        ctx.waitUntil(env.BOT_BLOCKER_KV.put("LEARNED_BAD_BOTS", JSON.stringify(Array.from(learnedBadBotsCache))));
-        ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
-        return new Response("Not Found", { status: 404 });
-      }
-    }
   }
   
-  // --- 動的ルール実行 (ラベルがSHの場合) ---
+  // --- 8. 動的ルール実行 (ラベルがSHの場合) ---
   if (refinedLabel === "[SH]") {
     // ヘッダー分析
     const secChUa = request.headers.get('Sec-Ch-Ua');
@@ -311,7 +303,7 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
   
-  // --- Amazon Botなりすましチェック ---
+  // --- 9. Amazon Botなりすましチェック ---
   if (ua.startsWith("AmazonProductDiscovery/1.0")) {
     const isVerified = await verifyBotIp(ip, "amazon", env, logBuffer);
     if (!isVerified) {
@@ -321,9 +313,10 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
 
-  // --- 全チェッククリア ---
+  // --- 10. 全チェッククリア ---
   return fetch(request);
 }
+
 
 // --- 3. コアヘルパー関数 ---
 
@@ -334,7 +327,7 @@ async function handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fin
     ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-1", { expirationTtl: 600 }));
     ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-${fingerprint}`, "temp-1", { expirationTtl: 600 }));
   } else if (effectiveCount === 2) {
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-2", { expirationTtl: 1800 })); // 30 mins
+    ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-2", { expirationTtl: 1800 }));
     ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-${fingerprint}`, "temp-2", { expirationTtl: 1800 }));
   } else if (effectiveCount === 3) {
     const twentyFourHours = 24 * 3600;
