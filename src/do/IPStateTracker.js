@@ -6,7 +6,7 @@
  * 2. fetch: DOエントリポイント
  * 3. getState / putState: ストレージ状態管理
  * 4. incrementCount: 違反カウント処理
- * 5. handleLocaleCheck: ロケールファンアウト検出（新ロジック）
+ * 5. handleLocaleCheck: ロケールファンアウト検出（修正版）
  * 6. handleRateLimit: 安全Botのレート制限
  * 7. parseLocale: パスから言語・国を抽出（特例含む）
  * =================================================================
@@ -130,10 +130,10 @@ async handleLocaleCheck(ip, path) {
   const state = await this.getState(ip);
   const now = Date.now();
 
-  // --- ✅ 除外対象パス ---
+  // --- ✅ 除外対象パス (既存) ---
   const excludePatterns = [
     '^/\\.well-known/',         // Shopify Monorail 等
-    '^/sf_private_access_tokens' // プライベートトークンAPI
+    '^/sf_private_access_tokens', // プライベートトークンAPI
     // ここに必要に応じて追加可能
   ];
   for (const pat of excludePatterns) {
@@ -143,8 +143,29 @@ async handleLocaleCheck(ip, path) {
       });
     }
   }
+  // --- 追加: 新たなシステム関連パスの除外パターン ---
+  const newExcludePatterns = [
+      '^/wpm@', // ShopifyのWeb Pixel Manager関連パス (例: /wpm@aa986369...)
+  ];
+  for (const pat of newExcludePatterns) {
+      if (new RegExp(pat).test(path)) {
+          return new Response(JSON.stringify({ violation: false }), {
+              headers: { "Content-Type": "application/json" }
+          });
+      }
+  }
+
 
   const { lang, country } = parseLocale(path);
+
+  // ★★★ 追加: 'unknown'なロケールは処理対象外とする ★★★
+  // `parseLocale` が "unknown" を返した場合、ロケールファンアウトの判定には含めない
+  if (lang === "unknown" || country === "unknown") {
+      return new Response(JSON.stringify({ violation: false }), {
+          headers: { "Content-Type": "application/json" }
+      });
+  }
+
 
   // --- 古い記録の掃除（10秒以上前） ---
   for (const [key, ts] of Object.entries(state.lgRegions)) {
@@ -228,5 +249,7 @@ function parseLocale(path) {
   }
 
   // --- 不明ロケール ---
+  // ".well-known" や "wpm@" のようなパスは、この分岐に到達し "unknown-unknown" を返す。
+  // その後、handleLocaleCheck でこれらのパターンは除外されるため、誤検知の原因にはならない。
   return { lang: "unknown", country: "unknown" };
 }
