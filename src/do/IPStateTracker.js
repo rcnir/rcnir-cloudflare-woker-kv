@@ -98,42 +98,59 @@ export class IPStateTracker {
     });
   }
 
-  /*
-   * =================================================================
-   * 5. handleLocaleCheck: ロケールファンアウト検出（新ロジック）
-   * =================================================================
-   */
+/*
+ * =================================================================
+ * 5. handleLocaleCheck: ロケールファンアウト検出（修正版）
+ * =================================================================
+ */
 async handleLocaleCheck(ip, path) {
   const state = await this.getState(ip);
   const now = Date.now();
 
+  // --- ✅ 除外対象パス ---
+  const excludePatterns = [
+    '^/\\.well-known/',        // Shopify Monorail 等
+    '^/sf_private_access_tokens'  // プライベートトークンAPI
+    // ここに必要に応じて追加可能
+  ];
+  for (const pat of excludePatterns) {
+    if (new RegExp(pat).test(path)) {
+      return new Response(JSON.stringify({ violation: false }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
+
   const { lang, country } = parseLocale(path);
 
-  // 古い記録を掃除
+  // --- 古い記録の掃除（10秒以上前） ---
   for (const [key, ts] of Object.entries(state.lgRegions)) {
     if (now - ts > this.LOCALE_WINDOW_MS) {
       delete state.lgRegions[key];
     }
   }
 
-  state.lgRegions[`${lang}-${country}`] = now;
+  // --- 最新ステートを追加 ---
+  const currentKey = `${lang}-${country}`;
+  state.lgRegions[currentKey] = now;
 
-  // 国セットのサイズをチェック
+  // --- 国セットのチェック（2国以上 = 違反）---
   const countries = new Set(
     Object.keys(state.lgRegions).map(k => k.split("-")[1])
   );
-
   const violation = countries.size >= 2;
 
+  // --- 違反時処理 ---
   if (violation) {
     state.count += 1;
-    state.lgRegions = {};
+    state.lgRegions = {};  // リセット
     await this.putState(ip, state);
     return new Response(JSON.stringify({ violation: true, count: state.count }), {
       headers: { "Content-Type": "application/json" }
     });
   }
 
+  // --- 通常時の保存および否違反レスポンス ---
   await this.putState(ip, state);
   return new Response(JSON.stringify({ violation: false }), {
     headers: { "Content-Type": "application/json" }
