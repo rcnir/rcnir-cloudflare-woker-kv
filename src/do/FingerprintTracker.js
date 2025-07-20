@@ -1,6 +1,6 @@
 // 設定可能な定数
 const RATE_LIMIT_WINDOW_MS = 10 * 1000; // 10秒
-const RATE_LIMIT_THRESHOLD = 5;          // 10秒間に5リクエスト以上で違反
+const RATE_LIMIT_THRESHOLD = 5;         // 10秒間に5リクエスト以上で違反
 
 const PATH_HISTORY_WINDOW_MS = 60 * 1000; // 60秒
 const PATH_HISTORY_THRESHOLD = 10;        // 60秒間に10個以上の異なるパスで違反
@@ -42,10 +42,10 @@ export class FingerprintTracker {
     _getInitialState() {
         const now = Date.now();
         return {
-            count: 0, 
-            localeViolationCount: 0, 
-            lgRegions: {}, 
-            singleLocaleAccess: { 
+            count: 0,
+            localeViolationCount: 0,
+            lgRegions: {},
+            singleLocaleAccess: {
                 count: 0,
                 firstAccess: 0,
                 locale: ''
@@ -207,10 +207,15 @@ export async function generateFingerprint(request) {
 
     let fpParts = [];
 
-    // --- フィンガープリントのコア要素 (現在のFPロジック) ---
+    // --- フィンガープリントのコア要素 ---
     fpParts.push(`UA:${String(headers.get("User-Agent") || "UnknownUA").trim()}`);
-    fpParts.push(`ASN:${String(cf.asn || "UnknownASN").trim()}`);    
+    fpParts.push(`ASN:${String(cf.asn || "UnknownASN").trim()}`);   
     fpParts.push(`C:${String(cf.country || "UnknownCountry").trim()}`);  
+
+    // ★★★ 修正案: ヘッダー情報を追加してフィンガープリントの精度を向上 ★★★
+    fpParts.push(`AL:${String(headers.get("Accept-Language") || "N/A").trim()}`);
+    fpParts.push(`SCP:${String(headers.get("Sec-Ch-Ua-Platform") || "N/A").trim()}`);
+    // ★★★ 修正案ここまで ★★★
 
     // --- ハッシュ化 ---
     const fingerprintString = fpParts.join('|');
@@ -241,8 +246,6 @@ export async function generateFingerprint(request) {
     console.log(`[FP_FULL_DEBUG] Headers - Upgrade-Insecure-Requests: "${headers.get("Upgrade-Insecure-Requests") || "N/A"}"`);
 
     // ★★★ コメントアウトしていた request.cf 項目を個別ログ出力 ★★★
-    // cf.tlsCipher, cf.tlsVersion, cf.tlsClientHelloLength, cf.tlsClientRandom, cf.tlsClientCiphersSha1, cf.tlsClientExtensionsSha1, cf.tlsClientExtensionsSha1Le
-    // cf.clientTcpRtt, cf.longitude, cf.latitude, cf.city, cf.region, cf.postalCode, cf.httpProtocol
     console.log(`[FP_FULL_DEBUG] CF - Colo: "${cf.colo || "N/A"}"`);
     console.log(`[FP_FULL_DEBUG] CF - Timezone: "${cf.timezone || "N/A"}"`);
     console.log(`[FP_FULL_DEBUG] CF - HTTP Protocol: "${cf.httpProtocol || "N/A"}"`);
