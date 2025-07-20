@@ -85,6 +85,8 @@ export async function generateFingerprint(request) {
   fingerprintString += cf.country || "";   // 国コード (例: JP, US)
   fingerprintString += cf.city || "";      // 市町村 (精度はIPによる)
   fingerprintString += cf.region || "";    // 地域コード
+  fingerprintString += cf.tlsCipher || ""; // TLS暗号スイート
+  fingerprintString += cf.tlsVersion || ""; // TLSバージョン
 
   // 7. IPアドレスのサブネットの一部 (IPが変わっても同じネットワークからの可能性)
   // IPv4の最初の3オクテット、IPv6の最初の4セグメント
