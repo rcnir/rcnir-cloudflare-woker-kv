@@ -1,13 +1,13 @@
 // 設定可能な定数
-const RATE_LIMIT_WINDOW_MS = 10 * 1000; // 10秒
-const RATE_LIMIT_THRESHOLD = 5;         // 10秒間に5リクエスト以上で違反
+const RATE_LIMIT_WINDOW_MS = 10 * 1000;
+const RATE_LIMIT_THRESHOLD = 5;
 
-const PATH_HISTORY_WINDOW_MS = 60 * 1000; // 60秒
-const PATH_HISTORY_THRESHOLD = 10;        // 60秒間に10個以上の異なるパスで違反
+const PATH_HISTORY_WINDOW_MS = 60 * 1000;
+const PATH_HISTORY_THRESHOLD = 10;
 
-const LOCALE_WINDOW_MS = 10 * 1000; // ロケールファンアウトの判定ウィンドウ (10秒)
-const SINGLE_LOCALE_ACCESS_WINDOW_MS = 5 * 1000; // 5秒
-const SINGLE_LOCALE_ACCESS_THRESHOLD = 3;        // 5秒間に3回以上同じロケールにアクセスで違反 (既に履歴があるFP向け)
+const LOCALE_WINDOW_MS = 10 * 1000;
+const SINGLE_LOCALE_ACCESS_WINDOW_MS = 5 * 1000;
+const SINGLE_LOCALE_ACCESS_THRESHOLD = 3;
 
 // CRC32の実装
 function crc32(str) {
@@ -26,13 +26,11 @@ function crc32(str) {
     return (crc ^ -1) >>> 0;
 }
 
-
-
 export class FingerprintTracker {
     constructor(state, env) {
         this.state = state;
         this.env = env;
-        this.stateData = null; // 初期化はfetch内で非同期で行う
+        this.stateData = null;
 
         this.state.blockConcurrencyWhile(async () => {
             this.stateData = (await this.state.storage.get("state")) || this._getInitialState();
@@ -201,79 +199,71 @@ export class FingerprintTracker {
 }
 
 // フィンガープリントを生成する関数 (Durable Object クラスの外に定義)
-export async function generateFingerprint(request) {
+// ★ 変更: logBufferを引数として受け取る
+export async function generateFingerprint(request, logBuffer) {
     const headers = request.headers;
     const cf = request.cf || {};
 
     let fpParts = [];
 
-    // --- 既存のフィンガープリント要素 ---
+    // --- フィンガープリントのコア要素 ---
     fpParts.push(`UA:${String(headers.get("User-Agent") || "UnknownUA").trim()}`);
     fpParts.push(`ASN:${String(cf.asn || "UnknownASN").trim()}`);   
     fpParts.push(`C:${String(cf.country || "UnknownCountry").trim()}`);  
     fpParts.push(`AL:${String(headers.get("Accept-Language") || "N/A").trim()}`);
     fpParts.push(`SCP:${String(headers.get("Sec-Ch-Ua-Platform") || "N/A").trim()}`);
-
-    // ★★★ ここから下を追加 ★★★
-    // JA3フィンガープリントの要素を追加して精度を最大化
     fpParts.push(`TC:${String(cf.tlsCipher || "N/A").trim()}`);
     fpParts.push(`TV:${String(cf.tlsVersion || "N/A").trim()}`);
     fpParts.push(`TCS:${String(cf.tlsClientCiphersSha1 || "N/A").trim()}`);
-    // ★★★ ここまで追加 ★★★
 
-    // --- ハッシュ化 ---
     const fingerprintString = fpParts.join('|');
     const fingerprint = crc32(fingerprintString).toString(16).padStart(8, '0');
 
-    // ★★★ デバッグ用ログ出力を強化 (コメントアウトした項目も詳細表示) ★★★
-    console.log(`--- FP_FULL_DEBUG START ---`);
-    console.log(`[FP_FULL_DEBUG] URL: ${request.url}`);
-    console.log(`[FP_FULL_DEBUG] IP: ${headers.get("CF-Connecting-IP") || "N/A"}`);
+    // ★ 変更: すべてのconsole.logをlogBuffer.pushに置き換え
+    logBuffer.push(`--- FP_FULL_DEBUG START ---`);
+    logBuffer.push(`[FP_FULL_DEBUG] URL: ${request.url}`);
+    logBuffer.push(`[FP_FULL_DEBUG] IP: ${headers.get("CF-Connecting-IP") || "N/A"}`);
     
-    // 現在のFP構成要素のログ (維持)
-    console.log(`[FP_FULL_DEBUG] Original UA: "${headers.get("User-Agent") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Original ASN: "${cf.asn || "N/A"}", Original Country: "${cf.country || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Constructed String: "${fingerprintString}" -> Generated FP (CRC32): "${fingerprint}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Original UA: "${headers.get("User-Agent") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Original ASN: "${cf.asn || "N/A"}", Original Country: "${cf.country || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Constructed String: "${fingerprintString}" -> Generated FP (CRC32): "${fingerprint}"`);
 
-    // ★★★ コメントアウトしていたヘッダー項目を個別ログ出力 ★★★
-    console.log(`[FP_FULL_DEBUG] Headers - Accept: "${headers.get("Accept") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Accept-Encoding: "${headers.get("Accept-Encoding") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Accept-Language: "${headers.get("Accept-Language") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Sec-Ch-Ua: "${headers.get("Sec-Ch-Ua") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Sec-Ch-Ua-Mobile: "${headers.get("Sec-Ch-Ua-Mobile") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Sec-Ch-Ua-Platform: "${headers.get("Sec-Ch-Ua-Platform") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Sec-Fetch-Site: "${headers.get("Sec-Fetch-Site") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Sec-Fetch-Mode: "${headers.get("Sec-Fetch-Mode") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Sec-Fetch-Dest: "${headers.get("Sec-Fetch-Dest") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Sec-Fetch-User: "${headers.get("Sec-Fetch-User") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Referer: "${headers.get("Referer") || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] Headers - Upgrade-Insecure-Requests: "${headers.get("Upgrade-Insecure-Requests") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Accept: "${headers.get("Accept") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Accept-Encoding: "${headers.get("Accept-Encoding") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Accept-Language: "${headers.get("Accept-Language") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Sec-Ch-Ua: "${headers.get("Sec-Ch-Ua") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Sec-Ch-Ua-Mobile: "${headers.get("Sec-Ch-Ua-Mobile") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Sec-Ch-Ua-Platform: "${headers.get("Sec-Ch-Ua-Platform") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Sec-Fetch-Site: "${headers.get("Sec-Fetch-Site") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Sec-Fetch-Mode: "${headers.get("Sec-Fetch-Mode") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Sec-Fetch-Dest: "${headers.get("Sec-Fetch-Dest") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Sec-Fetch-User: "${headers.get("Sec-Fetch-User") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Referer: "${headers.get("Referer") || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] Headers - Upgrade-Insecure-Requests: "${headers.get("Upgrade-Insecure-Requests") || "N/A"}"`);
 
-    // ★★★ コメントアウトしていた request.cf 項目を個別ログ出力 ★★★
-    console.log(`[FP_FULL_DEBUG] CF - Colo: "${cf.colo || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Timezone: "${cf.timezone || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - HTTP Protocol: "${cf.httpProtocol || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - TLS Cipher: "${cf.tlsCipher || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - TLS Version: "${cf.tlsVersion || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Client Hello Length: "${cf.tlsClientHelloLength || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Client Random: "${cf.tlsClientRandom || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Client Ciphers Sha1: "${cf.tlsClientCiphersSha1 || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Client Extensions Sha1: "${cf.tlsClientExtensionsSha1 || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Client Extensions Sha1 Le: "${cf.tlsClientExtensionsSha1Le || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Client TCP RTT: "${cf.clientTcpRtt || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Longitude: "${cf.longitude || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Latitude: "${cf.latitude || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - City: "${cf.city || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Region: "${cf.region || "N/A"}"`);
-    console.log(`[FP_FULL_DEBUG] CF - Postal Code: "${cf.postalCode || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Colo: "${cf.colo || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Timezone: "${cf.timezone || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - HTTP Protocol: "${cf.httpProtocol || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - TLS Cipher: "${cf.tlsCipher || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - TLS Version: "${cf.tlsVersion || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Client Hello Length: "${cf.tlsClientHelloLength || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Client Random: "${cf.tlsClientRandom || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Client Ciphers Sha1: "${cf.tlsClientCiphersSha1 || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Client Extensions Sha1: "${cf.tlsClientExtensionsSha1 || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Client Extensions Sha1 Le: "${cf.tlsClientExtensionsSha1Le || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Client TCP RTT: "${cf.clientTcpRtt || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Longitude: "${cf.longitude || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Latitude: "${cf.latitude || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - City: "${cf.city || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Region: "${cf.region || "N/A"}"`);
+    logBuffer.push(`[FP_FULL_DEBUG] CF - Postal Code: "${cf.postalCode || "N/A"}"`);
 
-    console.log(`--- FP_FULL_DEBUG END ---`);
+    logBuffer.push(`--- FP_FULL_DEBUG END ---`);
 
     return fingerprint;
 }
 
 // Durable Object内でparseLocaleが必要なため、ここに定義
-// ユーティリティ関数は共有ファイルにまとめるのがベストだが、ここではFingerprintTracker.js内に含める
 function parseLocale(path) {
     const trimmedPath = path.replace(/^\/+/, "").toLowerCase();
     const seg = trimmedPath.split("/")[0];
