@@ -28,7 +28,7 @@ bindings = [
   { name = "IP_STATE_TRACKER", class_name = "IPStateTracker" },
   { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTracker" } # ★ この行を追加してください ★
 ]
-
-# Migration (v3に更新)
+# ★★★ ここに新しいマイグレーションを追加します ★★★
 [[migrations]]
-tag = "v4"
+tag = "v5_add_fingerprint_tracker" # 新しいマイグレーションの一意なタグ
+new_classes = ["FingerprintTracker"] # 新たにDurable Objectとして登録するクラス名
