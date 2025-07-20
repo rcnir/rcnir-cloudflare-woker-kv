@@ -374,7 +374,7 @@ async function handle(request, env, ctx) {
       const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
       const doRes = await fpTrackerStub.fetch(new Request("https://internal/record-js-execution", {
           method: 'POST',
-          headers: { "X-Fingerprint-ID": fingerprint }
+          headers: {"X-Fingerprint-ID": fingerprint}
       }));
 
       if (!doRes.ok) {
@@ -416,7 +416,7 @@ async function handle(request, env, ctx) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({ path: url.pathname }) // アクセスパスを送信
-    }));
+    })));
 
 
     // どちらかのロケールチェックで違反が検知されたらブロック
