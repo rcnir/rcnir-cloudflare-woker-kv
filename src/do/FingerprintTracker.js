@@ -95,7 +95,7 @@ export class FingerprintTracker {
                 this.stateData.lgRegions[currentLocaleKey] = localNow;
 
                 const countries = new Set(Object.keys(this.stateData.lgRegions).map(k => k.split("-")[1]));
-                if (countries.size >= 2) {
+                if (countries.size >= 3) {
                     violationDetected = true;
                     this.stateData.localeViolationCount++;
                     this.stateData.count++;
