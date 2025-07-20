@@ -32,40 +32,36 @@
  *
  * 永続ブロックされたIPの全ログをR2で一覧表示:
  * npx wrangler r2 object list rocaniiru-log
- *
+ *１
  * =================================================================
  */
 
 
 // --- 1. エクスポートとメインハンドラ ---
-
 import { IPStateTracker } from "./do/IPStateTracker.js";
-// ★変更: FingerprintTracker DOとフィンガープリント生成関数をインポート★
 import { FingerprintTracker, generateFingerprint } from "./do/FingerprintTracker.js";
 
 export { IPStateTracker };
-export { FingerprintTracker }; // ★変更: Durable Objectとして公開するために必要★
+export { FingerprintTracker };
 
 let botCidrsCache = null;
 let unwantedBotPatternsCache = null;
-let learnedBadBotsCache = null; // Bad Botパターン学習用キャッシュ
-let badBotDictionaryCache = null; // Bad Bot辞書用キャッシュ
-
+let learnedBadBotsCache = null;
+let badBotDictionaryCache = null;
 
 export default {
     async fetch(request, env, ctx) {
-        // envオブジェクトをhandle関数に渡すように修正
         return handle(request, env, ctx);
     },
 
     async scheduled(event, env, ctx) {
+        // ... (この部分は前回の修正から変更なし) ...
         console.log("Cron Trigger fired: Syncing permanent block list...");
-        const id = env.IP_STATE_TRACKER.idFromName("sync-job"); // Binding名を変更
+        const id = env.IP_STATE_TRACKER.idFromName("sync-job");
         const stub = env.IP_STATE_TRACKER.get(id);
-        const res = await stub.fetch(new Request("https://internal/list-high-count")); // IP_STATE_TRACKERから高カウントIPを取得
+        const res = await stub.fetch(new Request("https://internal/list-high-count"));
         if (!res.ok) {
             console.error(`Failed to fetch high count IPs from DO. Status: ${res.status}`);
-            // エラー時でもFP同期は試行する
         } else {
             const ipsToBlock = await res.json();
             if (ipsToBlock && ipsToBlock.length > 0) {
@@ -77,7 +73,6 @@ export default {
             }
         }
 
-        // ★変更: FingerprintTrackerから高カウントフィンガープリントを直接KVから取得し同期★
         let cursor = undefined;
         const allHighCountFpKeys = [];
         do {
@@ -90,7 +85,6 @@ export default {
             const promises = allHighCountFpKeys.map(fp => env.BOT_BLOCKER_KV.put(`FP-${fp}`, "permanent-block"));
             await Promise.all(promises);
             console.log(`Synced ${allHighCountFpKeys.length} permanent block Fingerprints to KV.`);
-            // KVから一時的な"FP-HIGH-COUNT-"エントリを削除
             const deletePromises = allHighCountFpKeys.map(fp => env.BOT_BLOCKER_KV.delete(`FP-HIGH-COUNT-${fp}`));
             await Promise.all(deletePromises);
         } else {
