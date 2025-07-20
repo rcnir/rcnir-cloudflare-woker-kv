@@ -24,12 +24,10 @@ bucket_name = "rocaniiru-log"
 
 # Durable Object (名前とクラス名を変更)
 # ここをコメントアウトするか、bindings = [] に変更
-# [durable_objects]
-# bindings = [
-#   { name = "IP_STATE_TRACKER", class_name = "IPStateTracker" }
-# ]
 [durable_objects]
-bindings = [] # Durable Objectのバインディングを空にする
+bindings = [
+   { name = "IP_STATE_TRACKER", class_name = "IPStateTracker" }
+ ]
 
 # Migration (v3に更新)
 [[migrations]]
