@@ -217,58 +217,75 @@ export async function generateFingerprint(request) {
 
     let fingerprintString = "";
 
-    // 1. User-Agent のコア部分 (揺れを吸収するために簡略化)
+    // 1. User-Agent のコア部分 (最も安定したブラウザ/OS情報のみ)
+    // これをフィンガープリントの主要な要素とします。
     const ua = headers.get("User-Agent") || "";
-    const uaMatch = ua.match(/(Chrome|Firefox)\/(\d+)\./i); // Chrome/120
-    const osMatch = ua.match(/(Windows NT \d+\.\d+|Macintosh; Intel Mac OS X \d+_\d+_\d+|Linux)/i); // Windows NT 10.0, Mac OS X 10_15_7
+    // 主要ブラウザとメジャーバージョンに絞る (例: Chrome/138, Firefox/140)
+    const browserMatch = ua.match(/(Chrome|Firefox|Safari|Edg|OPR|MSIE|Trident)\/(\d+)/i); 
+    // 主要OSとそのメジャーバージョンに絞る (例: Windows NT 10.0, Mac OS X 10_15)
+    const osMatch = ua.match(/(Windows NT \d+\.\d+|Macintosh; Intel Mac OS X \d+(_\d+)?|Linux|Android|iPhone OS \d+(_\d+)?|iPad OS \d+(_\d+)?)/i); 
     
-    if (uaMatch && uaMatch[1] && uaMatch[2]) {
-        fingerprintString += `UA:${uaMatch[1]}-${uaMatch[2]}`; // 例: UA:Chrome-120
+    // ブラウザの識別 (例: B:Chrome-138)
+    if (browserMatch && browserMatch[1] && browserMatch[2]) {
+        fingerprintString += `B:${browserMatch[1].replace('OPR', 'Opera')}-${browserMatch[2]}`;
     } else {
-        fingerprintString += `UA:${ua}`; // マッチしない場合はUser-Agent全体を使う (フォールバック)
+        // 認識できないブラウザの場合、User-Agent全体をハッシュ化するが、長すぎる場合は汎用化
+        if (ua.length > 200 || /(bot|crawl|spider|slurp|fetch|headless|preview|externalagent)/i.test(ua)) {
+            fingerprintString += `B:GenericBotOrUnknown`;
+        } else {
+            fingerprintString += `B:${ua}`;
+        }
     }
+
+    // OSの識別 (例: OS:Macintosh_Intel_Mac_OS_X_10_15)
     if (osMatch && osMatch[0]) {
-        fingerprintString += `_OS:${osMatch[0].replace(/ /g, '_')}`; // 例: _OS:Macintosh;_Intel_Mac_OS_X_10_15_7
+        fingerprintString += `_OS:${osMatch[0].replace(/ /g, '_').replace(/\./g, '_').replace(/;/g, '_')}`;
+    } else {
+        fingerprintString += `_OS:Unknown`; // 認識できないOS
     }
     
-    // 2. Accept ヘッダー群
-    fingerprintString += `|AL:${headers.get("Accept-Language") || ""}`;
-    fingerprintString += `|AE:${headers.get("Accept-Encoding") || ""}`;
-    fingerprintString += `|A:${headers.get("Accept") || ""}`;
+    // ★★★ これまでのすべてのヘッダーは除外します ★★★
+    // これらのヘッダーはリクエストの種類、タイミング、ブラウザの内部挙動、またはネットワークプロキシによって変動するため、不安定性の原因となります。
+    // Accept ヘッダー群は除外
+    /* fingerprintString += `|AL:${headers.get("Accept-Language") || ""}`; */
+    /* fingerprintString += `|AE:${headers.get("Accept-Encoding") || ""}`; */
+    /* fingerprintString += `|A:${headers.get("Accept") || ""}`; */
 
-    // 3. Client Hints (存在すれば) - これらは非常に強力
-    fingerprintString += `|SCU:${headers.get("Sec-Ch-Ua") || ""}`;
-    fingerprintString += `|SCUM:${headers.get("Sec-Ch-Ua-Mobile") || ""}`;
-    fingerprintString += `|SCUP:${headers.get("Sec-Ch-Ua-Platform") || ""}`;
+    // Client Hints も除外
+    /* fingerprintString += `|SCU:${headers.get("Sec-Ch-Ua") || ""}`; */
+    /* fingerprintString += `|SCUM:${headers.get("Sec-Ch-Ua-Mobile") || ""}`; */
+    /* fingerprintString += `|SCUP:${headers.get("Sec-Ch-Ua-Platform") || ""}`; */
 
-    // 4. Sec-Fetch ヘッダー群 - これらも強力
-    fingerprintString += `|SFS:${headers.get("Sec-Fetch-Site") || ""}`;
-    fingerprintString += `|SFM:${headers.get("Sec-Fetch-Mode") || ""}`;
-    fingerprintString += `|SFD:${headers.get("Sec-Fetch-Dest") || ""}`;
-    fingerprintString += `|SFU:${headers.get("Sec-Fetch-User") || ""}`;
+    // Sec-Fetch ヘッダー群も除外
+    /* fingerprintString += `|SFS:${headers.get("Sec-Fetch-Site") || ""}`; */
+    /* fingerprintString += `|SFM:${headers.get("Sec-Fetch-Mode") || ""}`; */
+    /* fingerprintString += `|SFD:${headers.get("Sec-Fetch-Dest") || ""}`; */
+    /* fingerprintString += `|SFU:${headers.get("Sec-Fetch-User") || ""}`; */
 
-    // 5. Referer (ある場合) - 変動しやすいためコメントアウト
-    // fingerprintString += `|R:${headers.get("Referer") || ""}`; 
-    fingerprintString += `|UIR:${headers.get("Upgrade-Insecure-Requests") || ""}`;
+    // Referer も除外（維持）
+    /* fingerprintString += `|R:${headers.get("Referer") || ""}`; */
+    // Upgrade-Insecure-Requests も除外（リクエストの種類で変動し得る）
+    /* fingerprintString += `|UIR:${headers.get("Upgrade-Insecure-Requests") || ""}`; */
 
 
-    // 6. Cloudflare メタデータ (request.cf) - ネットワーク層の特性
-    // ここで安定しているものだけを残す
-    fingerprintString += `|ASN:${cf.asn || ""}`;    // AS番号 (安定している)
-    fingerprintString += `|C:${cf.country || ""}`;  // 国コード (安定している)
-    fingerprintString += `|TZ:${cf.timezone || ""}`; // タイムゾーン (安定している)
-    fingerprintString += `|COLO:${cf.colo || ""}`; // データセンターコード (安定している)
-    fingerprintString += `|HP:${cf.httpProtocol || ""}`; // HTTPプロトコル (安定している)
+    // 2. Cloudflare メタデータ (request.cf) - ネットワーク層の真に安定した特性
+    // IPアドレスや変動しやすいTLS情報は含めない。
+    fingerprintString += `|ASN:${cf.asn || ""}`;    // AS番号 (ユーザーのISP)
+    fingerprintString += `|C:${cf.country || ""}`;  // 国コード (ユーザーの所在地)
+    fingerprintString += `|TZ:${cf.timezone || ""}`; // タイムゾーン (ユーザーの地域設定)
+    fingerprintString += `|COLO:${cf.colo || ""}`; // データセンターコード (リクエストがどこに着地したか)
+    // HTTPプロトコルも除外（HTTP/1.1, HTTP/2, HTTP/3など変わる可能性があるため）
+    /* fingerprintString += `|HP:${cf.httpProtocol || ""}`; */ 
 
-    // TLS関連の項目や、クライアント側のTCP/地理情報など、常に変動する可能性のあるものは除外 (既存でコメントアウト済み)
+    // TLS関連の項目や、クライアント側のTCP/地理情報など、常に変動する可能性のあるものは引き続き除外（コメントアウトを維持）
     /*
-    fingerprintString += cf.tlsCipher || ""; // TLS暗号スイート
-    fingerprintString += cf.tlsVersion || ""; // TLSバージョン
-    fingerprintString += cf.tlsClientHelloLength || ""; // 常に揺れる
-    fingerprintString += cf.tlsClientRandom || ""; // 常に揺れる
-    fingerprintString += cf.tlsClientCiphersSha1 || ""; // 常に揺れる
-    fingerprintString += cf.tlsClientExtensionsSha1 || ""; // 常に揺れる
-    fingerprintString += cf.tlsClientExtensionsSha1Le || ""; // 常に揺れる
+    fingerprintString += cf.tlsCipher || "";
+    fingerprintString += cf.tlsVersion || "";
+    fingerprintString += cf.tlsClientHelloLength || "";
+    fingerprintString += cf.tlsClientRandom || "";
+    fingerprintString += cf.tlsClientCiphersSha1 || "";
+    fingerprintString += cf.tlsClientExtensionsSha1 || "";
+    fingerprintString += cf.tlsClientExtensionsSha1Le || "";
     fingerprintString += cf.clientTcpRtt || "";
     fingerprintString += cf.longitude || "";
     fingerprintString += cf.latitude || "";
