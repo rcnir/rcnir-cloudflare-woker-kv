@@ -113,12 +113,9 @@ async function handle(request, env, ctx) {
     // IPStateTracker の admin/reset-all-violations を呼び出す
     // IPStateTracker には内部的に deleteAll を呼び出すエンドポイントが必要です
     const ipStateTrackerStub = env.IP_STATE_TRACKER.idFromName("master-reset-key"); // 特定のマスターDO ID
-    const ipRes = await env.IP_STATE_TRACKER.get(ipStateTrackerStub).fetch(
-        new Request("https://internal/admin/reset-all-violations", {
-            headers: { "X-Reset-Key": resetKey } // DO側で認証のためにキーを渡す
-        })
-    );
-
+    const ipRes = await env.IP_STATE_TRACKER.get(ipStateTrackerStub).fetch(new Request("https://internal/admin/reset-all-violations", {
+        headers: {"X-Reset-Key": resetKey} // DO側で認証のためにキーを渡す
+    }));
     
     if (ipRes.ok) {
         return new Response("All IP violation data has been reset.", { status: 200 });
@@ -135,12 +132,9 @@ async function handle(request, env, ctx) {
     // FingerprintTrackerも同様に、マスターリセットDO IDにリセット要求を送る
     // FingerprintTracker には内部的に deleteAll を呼び出すエンドポイントが必要です
     const fpTrackerStub = env.FINGERPRINT_TRACKER.idFromName("master-reset-key"); // 特定のマスターDO ID
-    const fpRes = await env.FINGERPRINT_TRACKER.get(fpTrackerStub).fetch(
-        new Request("https://internal/reset-state", {
-            headers: { "X-Reset-Key": resetKey } // DO側で認証のためにキーを渡す
-        })
-    );
-
+    const fpRes = await env.FINGERPRINT_TRACKER.get(fpTrackerStub).fetch(new Request("https://internal/reset-state", {
+        headers: {"X-Reset-Key": resetKey} // DO側で認証のためにキーを渡す
+    }));
 
     if (fpRes.ok) {
         return new Response("All FingerprintTracker states have been reset.", { status: 200 });
@@ -423,6 +417,7 @@ async function handle(request, env, ctx) {
       },
       body: JSON.stringify({ path: url.pathname }) // アクセスパスを送信
     }));
+
 
     // どちらかのロケールチェックで違反が検知されたらブロック
     let violationDetected = false;
