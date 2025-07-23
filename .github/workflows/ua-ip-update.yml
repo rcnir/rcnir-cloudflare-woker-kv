@@ -17,15 +17,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js # ★ 変更: wranglerのインストールと分離
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install dependencies # ★ 変更: jqはaptで、wranglerはnpmでインストール
+      - name: Install dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y jq
-          npm install -g wrangler
+          npm cache clean --force
+          npm install -g wrangler@latest
 
       # --- Job 1: Amazon IP CIDRs を KV にアップロード ---
       - name: Fetch and Prepare IP CIDRs
@@ -47,10 +48,7 @@ jobs:
 
       - name: Put IP CIDRs into KV
         run: |
-          npx wrangler kv:key put BOT_CIDRS \
-            --binding=BOT_BLOCKER_KV \
-            --path=final-bot-cidrs.json \
-            --remote
+          npx wrangler kv key put --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb" "BOT_CIDRS" --path="./final-bot-cidrs.json"
 
       # --- Job 2: bad-bots.txt を R2 にアップロード ---
       - name: Fetch and Upload Bad Bot Dictionary to R2
@@ -58,8 +56,4 @@ jobs:
           curl -s \
             https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker/master/bad-bots.txt \
             -o bad-bots.txt
-          npx wrangler r2 object put \
-            --bucket=rocaniiru-log \
-            --key=dictionaries/bad-bots.txt \
-            --file=bad-bots.txt \
-            --remote
+          npx wrangler r2 object put "rocaniiru-log/dictionaries/bad-bots.txt" --file="./bad-bots.txt"
