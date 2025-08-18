@@ -28,11 +28,12 @@ bindings = [
   { name = "IP_STATE_TRACKER", class_name = "IPStateTracker" },
   { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTracker" } # ★ この行を追加してください ★
 ]
-# ★★★ ここに新しいマイグレーションを追加します ★★★
+
+# wrangler.toml の末尾などに追加
 [[migrations]]
-tag = "v5_add_fingerprint_tracker_sqlite" # 新しいマイグレーションの一意なタグ (例: 日付やバージョンで区別)
-# new_classes の代わりに new_sqlite_classes を使用
-new_sqlite_classes = ["FingerprintTracker"] # 新たにDurable Objectとして登録するクラス名 (SQLite対応)
+tag = "v6_switch_to_score_system" # 以前のマイグレーションタグとは違う、一意なタグ
+delete_classes = ["IPStateTracker", "FingerprintTracker"]
+new_classes = ["IPStateTracker", "FingerprintTracker"]
 
 # in wrangler.toml
 [vars]
