@@ -2,14 +2,49 @@
 const SCORE_DECAY_PER_MINUTE = 1;
 const DECAY_INTERVAL_MS = 60 * 1000;
 
-// generateFingerprint と parseLocale は index.js 側で定義・使用されるため、
-// このファイル内での重複定義は不要です。
-// もし、このDOファイル単体でテストしたい場合は、以下のコメントアウトを解除してください。
-/*
-function crc32(str) { ... }
-export async function generateFingerprint(request, logBuffer) { ... }
-function parseLocale(path) { ... }
-*/
+// ★ 修正: crc32関数を再度定義
+function crc32(str) {
+    let crc = -1;
+    for (let i = 0; i < str.length; i++) {
+        let char = str.charCodeAt(i);
+        crc = (crc >>> 0) ^ char;
+        for (let j = 0; j < 8; j++) {
+            if ((crc & 1) === 1) {
+                crc = (crc >>> 1) ^ 0xEDB88320;
+            } else {
+                crc = (crc >>> 1);
+            }
+        }
+    }
+    return (crc ^ -1) >>> 0;
+}
+
+// ★ 修正: index.jsがインポートするために、generateFingerprint関数を再度エクスポート
+export async function generateFingerprint(request, logBuffer) {
+    const headers = request.headers;
+    const cf = request.cf || {};
+    let fpParts = [];
+
+    fpParts.push(`UA:${String(headers.get("User-Agent") || "UnknownUA").trim()}`);
+    fpParts.push(`ASN:${String(cf.asn || "UnknownASN").trim()}`);
+    fpParts.push(`C:${String(cf.country || "UnknownCountry").trim()}`);
+    fpParts.push(`AL:${String(headers.get("Accept-Language") || "N/A").trim()}`);
+    fpParts.push(`SCP:${String(headers.get("Sec-Ch-Ua-Platform") || "N/A").trim()}`);
+    fpParts.push(`TC:${String(cf.tlsCipher || "N/A").trim()}`);
+    fpParts.push(`TV:${String(cf.tlsVersion || "N/A").trim()}`);
+    fpParts.push(`TCS:${String(cf.tlsClientCiphersSha1 || "N/A").trim()}`);
+
+    const fingerprintString = fpParts.join('|');
+    const fingerprint = crc32(fingerprintString).toString(16).padStart(8, '0');
+
+    logBuffer.push(`--- FP_FULL_DEBUG START ---`);
+    logBuffer.push(`[FP_FULL_DEBUG] URL: ${request.url}`);
+    logBuffer.push(`[FP_FULL_DEBUG] IP: ${headers.get("CF-Connecting-IP") || "N/A"}`);
+    logBuffer.push(`[FP_FULL_DEBUG] Constructed String: "${fingerprintString}" -> Generated FP (CRC32): "${fingerprint}"`);
+    logBuffer.push(`--- FP_FULL_DEBUG END ---`);
+
+    return fingerprint;
+}
 
 export class FingerprintTracker {
   constructor(state, env) {
@@ -26,7 +61,7 @@ export class FingerprintTracker {
     return {
       score: 0,
       lastUpdated: Date.now(),
-      hasStrike: false, // 再犯ルール用のフラグ
+      hasStrike: false,
       jsExecuted: false,
       lgRegions: {}
     };
@@ -36,7 +71,6 @@ export class FingerprintTracker {
     if (!this.memState) {
         this.memState = await this.state.storage.get("state") || this._getInitialState();
     }
-
     const url = new URL(request.url);
     switch (url.pathname) {
       case "/update-score":
@@ -63,13 +97,11 @@ export class FingerprintTracker {
   
   async handleUpdateScore(request) {
     const { scoreToAdd, config } = await request.json();
-    
     const now = Date.now();
     const minutesPassed = Math.floor((now - this.memState.lastUpdated) / DECAY_INTERVAL_MS);
     if (minutesPassed > 0) {
       this.memState.score = Math.max(0, this.memState.score - (minutesPassed * SCORE_DECAY_PER_MINUTE));
     }
-
     this.memState.score += scoreToAdd;
     this.memState.lastUpdated = now;
 
@@ -91,44 +123,44 @@ export class FingerprintTracker {
         action = "TEMP_BLOCK";
       }
     }
-    
     await this.state.storage.put("state", this.memState);
-    
     return new Response(JSON.stringify({ newScore: this.memState.score, action }), {
       headers: { 'Content-Type': 'application/json' }
     });
   }
 
   async handleLocaleCheck(request) {
-    // この関数はIPStateTrackerの同名関数とほぼ同じロジックです
-    const { path } = await request.json();
-    const { lang, country } = parseLocale(path);
-    if (lang === "unknown" || country === "unknown") {
+    const { path, config, country } = await request.json();
+    const { lang, country: pathCountry } = parseLocale(path);
+    if (lang === "unknown" || pathCountry === "unknown") {
       return new Response(JSON.stringify({ violation: false }));
     }
     const now = Date.now();
     const window = 10 * 1000;
-    const threshold = 3;
-    
     this.memState.lgRegions = this.memState.lgRegions || {};
     for (const [key, ts] of Object.entries(this.memState.lgRegions)) {
         if (now - ts > window) delete this.memState.lgRegions[key];
     }
-    
-    const currentKey = `${lang}-${country}`;
+    const currentKey = `${lang}-${pathCountry}`;
     this.memState.lgRegions[currentKey] = now;
+    const visitedLanguages = new Set(Object.keys(this.memState.lgRegions).map(k => k.split("-")[0]));
     
-    const countries = new Set(Object.keys(this.memState.lgRegions).map(k => k.split("-")[1]));
-    const violation = countries.size >= threshold;
+    const multiLangConfig = config?.multiLanguageCountries?.[country];
+    if (multiLangConfig) {
+      const isSubset = [...visitedLanguages].every(l => multiLangConfig.includes(l));
+      if (isSubset) {
+        await this.state.storage.put("state", this.memState);
+        return new Response(JSON.stringify({ violation: false, multiLangRule: true }));
+      }
+    }
 
+    const violation = visitedLanguages.size >= 3;
     if(violation) this.memState.lgRegions = {};
-    
     await this.state.storage.put("state", this.memState);
     return new Response(JSON.stringify({ violation }), { headers: { 'Content-Type': 'application/json' } });
   }
 }
 
-// このファイル内で `parseLocale` が必要なため、ここにも定義します。
 function parseLocale(path) {
   const trimmedPath = path.replace(/^\/+/, "").toLowerCase();
   const seg = trimmedPath.split("/")[0];
