@@ -2,7 +2,7 @@
 const SCORE_DECAY_PER_MINUTE = 1;
 const DECAY_INTERVAL_MS = 60 * 1000;
 
-export class IPStateTracker {
+export class IPStateTrackerV2 {
   constructor(state, env) {
     this.state = state;
     this.env = env;
