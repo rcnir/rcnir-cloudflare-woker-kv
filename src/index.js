@@ -251,14 +251,6 @@ async function handle(request, env, ctx, logBuffer) {
   }
   
   if (refinedLabel === "[SH]") {
-    if (ua.startsWith("AmazonProductDiscovery/1.0")) {
-      const isVerified = await verifyBotIp(ip, "amazon", env, logBuffer);
-      if (!isVerified) {
-        ctx.waitUntil(handleViolationSideEffects(ip, ua, "amazon-impersonation", 1, env, ctx, fingerprint, 1, logBuffer));
-        return new Response("Not Found", { status: 404 });
-      }
-    }
-
     const accept = request.headers.get('Accept') || '';
     const isHtmlRequest = accept.includes('text/html') || accept.includes('*/*') || accept === '';
     if (!isHtmlRequest) {
@@ -327,6 +319,16 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
   
+  // ★ 最終改善: Amazonなりすまし検証を最終ガードとして配置
+  if (ua.startsWith("AmazonProductDiscovery/1.0")) {
+    const isVerified = await verifyBotIp(ip, "amazon", env, logBuffer);
+    if (!isVerified) {
+      const reason = "amazon-impersonation";
+      ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
+      return new Response("Not Found", { status: 404 });
+    }
+  }
+
   return fetch(request);
 }
 
@@ -416,6 +418,7 @@ async function verifyBotIp(ip, botKey, env, logBuffer) {
 
 // --- 4. ユーティリティ関数 ---
 function isAdminPath(p){ return p.startsWith("/admin/") || p.startsWith("/reset-state") || p.startsWith("/debug/"); }
+
 function parseCookieSafe(req){
   const header = req.headers.get('Cookie') || '';
   const map = Object.create(null);
@@ -423,9 +426,11 @@ function parseCookieSafe(req){
     if (!part) continue;
     const i = part.indexOf('=');
     if (i < 1) continue;
-    const k = decodeURIComponent(part.slice(0, i).trim());
-    const v = decodeURIComponent(part.slice(i + 1).trim());
-    map[k] = v;
+    try {
+      const k = decodeURIComponent(part.slice(0, i).trim());
+      const v = decodeURIComponent(part.slice(i + 1).trim());
+      map[k] = v;
+    } catch { /* 無視 */ }
   }
   return map;
 }
@@ -441,7 +446,6 @@ function isAuthorizedAdmin(req, env){
   return val ? constantTimeEqual(val, env.ADMIN_KEY) : false;
 }
 
-// KV Pass Token
 const PASS_NS = "PASS:";
 function base64url(bytes) {
   let s = btoa(String.fromCharCode(...bytes));
