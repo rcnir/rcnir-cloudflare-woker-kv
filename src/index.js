@@ -13,45 +13,7 @@
  * =================================================================
  * 便利なターミナルコマンド (Useful Terminal Commands)
  * =================================================================
- *
- * --- ログ監視 (Log Monitoring) ---
- *
- * ■ 全てのログを表示
- * npx wrangler tail shopify-bot-blocker
- *
- * ■ TH判定 (信頼された人間) のみ表示
- * npx wrangler tail shopify-bot-blocker | grep -F "[TH]"
- *
- * ■ SH判定 (不審な人間) のみ表示
- * npx wrangler tail shopify-bot-blocker | grep -F "[SH]"
- *
- * ■ B判定 (ボット) のみ表示
- * npx wrangler tail shopify-bot-blocker | grep -F "[B]"
- *
- * ■ VIOLATION (違反検知) のみ表示
- * npx wrangler tail shopify-bot-blocker | grep "\[VIOLATION\]"
- *
- * --- KVストア管理 (KV Store Management) ---
- *
- * ■ ブロック中の全IP/FPを一覧表示
- * npx wrangler kv key list --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb"
- *
- * ■ 特定のIP/FPのブロック状態を確認 (例: "192.0.2.1")
- * npx wrangler kv key get --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb" "ここにIPアドレスかFPキーを入力"
- *
- * --- R2バケット管理 (R2 Bucket Management) ---
- *
- * ■ 永続ブロックされたボットの全ログファイル一覧を表示
- * npx wrangler r2 object list rocaniiru-log
- *
- * ■ 特定のログファイルの中身を表示 (例: "192.0.2.1-a1b2c3d4-...")
- * npx wrangler r2 object get rocaniiru-log "ここにファイル名を入力"
- *
- * --- デプロイ (Deployment) ---
- *
- * ■ WorkerをCloudflareにデプロイ
- * npx wrangler deploy
- *
+ * (コマンド一覧は変更なし)
  * =================================================================
  */
 
@@ -85,7 +47,6 @@ export default {
 
   async scheduled(event, env, ctx) {
     console.log("Cron Trigger fired: Syncing lists...");
-
     const object = await env.BLOCKLIST_R2.get("dictionaries/bad-bots.txt");
     if (object) {
       const text = await object.text();
@@ -173,27 +134,18 @@ async function handle(request, env, ctx, logBuffer) {
     return new Response("Not Found", { status: 404 });
   }
 
-  const asn = request.cf?.asn;
-  if (asn) {
-    if (asnBlocklistCache === null) {
-      const blocklistJson = await env.BOT_BLOCKER_KV.get("ASN_BLOCKLIST");
-      asnBlocklistCache = blocklistJson ? JSON.parse(blocklistJson) : [];
-    }
-    // ★改善点4: ASN即403をTurnstileチャレンジに降格
-    if (asnBlocklistCache.includes(String(asn))) {
-      logBuffer.push(`[ASN SUSPECT] ASN=${asn} → Turnstile`);
-      return presentTurnstileChallenge(request, env);
-    }
-  }
-  
   if (activeBadBotListCache === null) {
     const listJson = await env.BOT_BLOCKER_KV.get("ACTIVE_BAD_BOT_LIST");
     activeBadBotListCache = new Set(listJson ? JSON.parse(listJson) : []);
   }
   for (const patt of activeBadBotListCache) {
-    if (new RegExp(patt, "i").test(ua)) {
-      logBuffer.push(`[ACTIVE BAD BOT BLOCK] UA matched active list rule: ${patt}`);
-      return new Response("Forbidden", { status: 403 });
+    try {
+      if (new RegExp(patt, "i").test(ua)) {
+        logBuffer.push(`[ACTIVE BAD BOT BLOCK] UA matched active list rule: ${patt}`);
+        return new Response("Forbidden", { status: 403 });
+      }
+    } catch (e) {
+      logBuffer.push(`[REGEX_ERROR] Invalid pattern in ACTIVE_BAD_BOT_LIST: ${patt}`);
     }
   }
 
@@ -266,11 +218,14 @@ async function handle(request, env, ctx, logBuffer) {
       learnedBadBotsCache = new Set(Array.isArray(learnedList) ? learnedList : []);
     }
     for (const patt of learnedBadBotsCache) {
-      // ★改善点1: アンカー剥がしを削除
-      if (new RegExp(patt, "i").test(ua)) {
-        const reason = `unwanted-bot(learned):${patt}`;
-        ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
-        return new Response("Not Found", { status: 404 });
+      try {
+        if (new RegExp(patt, "i").test(ua)) {
+          const reason = `unwanted-bot(learned):${patt}`;
+          ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
+          return new Response("Not Found", { status: 404 });
+        }
+      } catch(e) {
+        logBuffer.push(`[REGEX_ERROR] Invalid pattern in LEARNED_BAD_BOTS: ${patt}`);
       }
     }
     
@@ -279,57 +234,79 @@ async function handle(request, env, ctx, logBuffer) {
       badBotDictionaryCache = listJson ? JSON.parse(listJson) : [];
     }
     for (const patt of badBotDictionaryCache) {
-      // ★改善点1: アンカー剥がしを削除
-      if (new RegExp(patt, "i").test(ua)) {
-        const reason = `unwanted-bot(new):${patt}`;
-        ctx.waitUntil((async () => {
-          activeBadBotListCache.add(patt);
-          await env.BOT_BLOCKER_KV.put("ACTIVE_BAD_BOT_LIST", JSON.stringify(Array.from(activeBadBotListCache)));
-        })());
-        ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
-        return new Response("Not Found", { status: 404 });
+      try {
+        if (new RegExp(patt, "i").test(ua)) {
+          const reason = `unwanted-bot(new):${patt}`;
+          if(activeBadBotListCache) {
+            activeBadBotListCache.add(patt);
+            ctx.waitUntil(env.BOT_BLOCKER_KV.put("ACTIVE_BAD_BOT_LIST", JSON.stringify(Array.from(activeBadBotListCache))));
+          }
+          ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
+          return new Response("Not Found", { status: 404 });
+        }
+      } catch(e) {
+        logBuffer.push(`[REGEX_ERROR] Invalid pattern in SYSTEM_BAD_BOT_LIST: ${patt}`);
       }
     }
   }
   
   if (refinedLabel === "[SH]") {
-    // ★改善点3: チャレンジはHTMLナビゲーションに限定
-    const accept = request.headers.get('Accept') || '';
-    if (!accept.includes('text/html')) {
-        logBuffer.push('[CHALLENGE SKIP] Non-HTML request');
-        return fetch(request);
+    if (ua.startsWith("AmazonProductDiscovery/1.0")) {
+      const isVerified = await verifyBotIp(ip, "amazon", env, logBuffer);
+      if (!isVerified) {
+        ctx.waitUntil(handleViolationSideEffects(ip, ua, "amazon-impersonation", 1, env, ctx, fingerprint, 1, logBuffer));
+        return new Response("Not Found", { status: 404 });
+      }
     }
 
-    // ★改善点3: Turnstile成功後の通行許可クッキーをチェック
-    const bypassCookie = (request.headers.get("Cookie")||"").split(/;\s*/).find(c=>c.startsWith("ts_pass="));
-    if (bypassCookie && await verifySignedPass(bypassCookie.split("=")[1], env.TURNSTILE_HMAC_SECRET)) {
-        logBuffer.push("[TURNSTILE BYPASS] Valid pass cookie found. Allowing request.");
+    const accept = request.headers.get('Accept') || '';
+    const isHtmlRequest = accept.includes('text/html') || accept.includes('*/*') || accept === '';
+    if (!isHtmlRequest) {
+      logBuffer.push('[CHALLENGE SKIP] Non-HTML request');
+      return fetch(request);
+    }
+    
+    const cookies = parseCookieSafe(request);
+    const passToken = cookies['ts_pass'];
+    if (passToken && await checkKvPassToken(env, passToken, fingerprint)) {
+        logBuffer.push("[TURNSTILE BYPASS] KV pass token valid. Allowing request.");
         return fetch(request);
     }
     
-    // ★改善点4: POSTリクエストではチャレンジを出さない
     if (request.method !== "GET") {
         logBuffer.push(`[CHALLENGE SKIP] Skipping challenge for non-GET request method: ${request.method}`);
         return fetch(request);
     }
     
-    // ★改善点6: WORKER_CONFIGのホットリロード
-    const kvConfig = await env.BOT_BLOCKER_KV.get("WORKER_CONFIG", { type: "json" });
-    if (workerConfigCache === null || workerConfigCache.version !== kvConfig.version) {
+    const kvConfig = await env.BOT_BLOCKER_KV.get("WORKER_CONFIG", { type: "json" }) ?? {};
+    if (workerConfigCache === null || (kvConfig && workerConfigCache.version !== kvConfig.version)) {
         workerConfigCache = kvConfig;
-        logBuffer.push(`[CONFIG] Hot reloaded worker configuration to version ${kvConfig.version}.`);
+        const v = kvConfig && typeof kvConfig.version !== 'undefined' ? kvConfig.version : 'none';
+        logBuffer.push(`[CONFIG] Hot reloaded worker configuration to version ${v}.`);
     }
     const config = workerConfigCache;
     let score = 0;
     const signals = [];
 
+    const asn = request.cf?.asn;
+    if (asn) {
+        if (asnBlocklistCache === null) {
+            const blocklistJson = await env.BOT_BLOCKER_KV.get("ASN_BLOCKLIST");
+            asnBlocklistCache = blocklistJson ? JSON.parse(blocklistJson) : [];
+        }
+        if (asnBlocklistCache.includes(String(asn))) {
+            score += config?.scores?.suspiciousAsn ?? 25;
+            signals.push(`suspicious_asn:${asn}`);
+        }
+    }
+
     const secChUa = request.headers.get('Sec-Ch-Ua');
     const acceptLanguage = request.headers.get('Accept-Language');
     if (!secChUa && !acceptLanguage) {
-      score += config.scores?.missingHeadersFull || 20;
+      score += config?.scores?.missingHeadersFull ?? 20;
       signals.push("missing_headers_full");
     } else if (!secChUa || !acceptLanguage) {
-      score += config.scores?.missingHeadersPartial || 10;
+      score += config?.scores?.missingHeadersPartial ?? 10;
       signals.push("missing_headers_partial");
     }
 
@@ -338,27 +315,18 @@ async function handle(request, env, ctx, logBuffer) {
         fpTrackerStub.fetch(new Request("https://internal/check-locale-fp", { method: 'POST', headers: { "X-Fingerprint-ID": fingerprint, "Content-Type": "application/json" }, body: JSON.stringify({ path }) }))
     ]);
     if ((ipLocaleRes.ok && (await ipLocaleRes.json()).violation) || (fpLocaleRes.ok && (await fpLocaleRes.json()).violation)) {
-        score += config.scores?.localeFanout || 20;
+        score += config?.scores?.localeFanout ?? 20;
         signals.push("locale_fanout");
     }
 
     logBuffer.push(`[SH_SCORE] Score: ${score} | Signals: [${signals.join(', ')}]`);
 
-    if (score >= (config.thresholds?.challenge || 40)) {
+    if (score >= (config?.thresholds?.challenge ?? 40)) {
         logBuffer.push(`[TURNSTILE CHALLENGE] Triggered by score ${score} for IP=${ip}`);
-        return presentTurnstileChallenge(request, env);
+        return presentTurnstileChallenge(request, env, fingerprint);
     }
   }
   
-  if (ua.startsWith("AmazonProductDiscovery/1.0")) {
-    const isVerified = await verifyBotIp(ip, "amazon", env, logBuffer);
-    if (!isVerified) {
-      const reason = "amazon-impersonation";
-      ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
-      return new Response("Not Found", { status: 404 });
-    }
-  }
-
   return fetch(request);
 }
 
@@ -369,6 +337,7 @@ async function handleTurnstileVerification(request, env) {
     const redirectUrl = url.searchParams.get('redirect_to');
     const formData = await request.formData();
     const token = formData.get('cf-turnstile-response');
+    const fingerprint = formData.get('fp');
     const ip = request.headers.get('CF-Connecting-IP');
 
     let validationResponse = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
@@ -379,10 +348,9 @@ async function handleTurnstileVerification(request, env) {
     const outcome = await validationResponse.json();
 
     if (outcome.success) {
-        // ★改善点3: 署名付き通行許可クッキーを発行
-        const pass = await issueSignedPass(env.TURNSTILE_HMAC_SECRET, 10); // 10分有効
+        const cookieStr = await issueKvPassToken(env, fingerprint, 10 * 60);
         const headers = new Headers();
-        headers.set('Set-Cookie', `ts_pass=${pass}; Max-Age=${10*60}; Path=/; HttpOnly; Secure; SameSite=Lax`);
+        headers.set('Set-Cookie', cookieStr);
         if (redirectUrl) {
             headers.set('Location', redirectUrl);
             return new Response(null, { status: 302, headers });
@@ -393,20 +361,20 @@ async function handleTurnstileVerification(request, env) {
     return new Response("Human verification failed. Please try again.", { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
 }
 
-function presentTurnstileChallenge(request, env) {
+function presentTurnstileChallenge(request, env, fingerprint) {
     const originalUrl = request.url;
     const siteKey = env.TURNSTILE_SITE_KEY;
     const html = `
       <!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>接続を確認しています...</title><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-      <meta name="robots" content="noindex,nofollow">
-      <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background-color:#f1f2f3;color:#333;}.container{text-align:center;padding:2em;background-color:white;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.1);}h1{font-size:1.2em;margin-bottom:0.5em;}p{margin-top:0;color:#666;}</style>
+      <meta name="robots" content="noindex,nofollow"><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background-color:#f1f2f3;color:#333;}.container{text-align:center;padding:2em;background-color:white;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.1);}h1{font-size:1.2em;margin-bottom:0.5em;}p{margin-top:0;color:#666;}</style>
       </head><body><div class="container"><h1>接続が安全であることを確認しています</h1><p>この処理は自動で行われます。しばらくお待ちください。</p>
       <form id="turnstile-form" action="/cf-turnstile/verify?redirect_to=${encodeURIComponent(originalUrl)}" method="POST">
+      <input type="hidden" name="fp" value="${fingerprint}">
       <div class="cf-turnstile" data-sitekey="${siteKey}" data-callback="onTurnstileSuccess"></div></form></div>
       <script>function onTurnstileSuccess(token){document.getElementById('turnstile-form').submit();}</script>
       </body></html>`;
-    return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+    return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } });
 }
 
 async function handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fingerprint, fpCount, logBuffer) {
@@ -448,30 +416,57 @@ async function verifyBotIp(ip, botKey, env, logBuffer) {
 
 // --- 4. ユーティリティ関数 ---
 function isAdminPath(p){ return p.startsWith("/admin/") || p.startsWith("/reset-state") || p.startsWith("/debug/"); }
+function parseCookieSafe(req){
+  const header = req.headers.get('Cookie') || '';
+  const map = Object.create(null);
+  for (const part of header.split(/;\s*/)) {
+    if (!part) continue;
+    const i = part.indexOf('=');
+    if (i < 1) continue;
+    const k = decodeURIComponent(part.slice(0, i).trim());
+    const v = decodeURIComponent(part.slice(i + 1).trim());
+    map[k] = v;
+  }
+  return map;
+}
+function constantTimeEqual(a, b){
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= (a.charCodeAt(i) ^ b.charCodeAt(i));
+  return r === 0;
+}
 function isAuthorizedAdmin(req, env){
-  const cookie = req.headers.get('Cookie')||'';
-  return cookie.includes(`admin_key=${env.ADMIN_KEY}`);
+  const c = parseCookieSafe(req);
+  const val = c['admin_key'];
+  return val ? constantTimeEqual(val, env.ADMIN_KEY) : false;
 }
 
-async function issueSignedPass(secret, minutes){
-  const exp = Date.now() + minutes*60*1000;
-  // ★改善点1: HMACのハッシュ指定を修正
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), {name:"HMAC", hash:"SHA-256"}, false, ["sign"]);
-  const sigBuf = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(String(exp)));
-  // ★改善点2: TurnstileクッキーをBase64URLに
-  const raw = String.fromCharCode(...new Uint8Array(sigBuf));
-  const sig = btoa(raw).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-  return `${exp}.${sig}`;
+// KV Pass Token
+const PASS_NS = "PASS:";
+function base64url(bytes) {
+  let s = btoa(String.fromCharCode(...bytes));
+  return s.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/,'');
 }
-async function verifySignedPass(token, secret){
-  const [exp, sig] = token.split('.',2);
-  if (!exp || !sig || Date.now()>Number(exp)) return false;
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), {name:"HMAC", hash:"SHA-256"}, false, ["sign"]);
-  const sigBuf = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(String(exp)));
-  // ★改善点2: TurnstileクッキーをBase64URLに
-  const raw = String.fromCharCode(...new Uint8Array(sigBuf));
-  const expect = btoa(raw).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-  return sig === expect;
+function generateToken(len = 32) {
+  const buf = new Uint8Array(len);
+  crypto.getRandomValues(buf);
+  return base64url(buf);
+}
+async function issueKvPassToken(env, fingerprint, ttlSeconds = 600) {
+  const token = generateToken();
+  const value = JSON.stringify({ fp: fingerprint, iat: Date.now() });
+  await env.BOT_BLOCKER_KV.put(PASS_NS + token, value, { expirationTtl: ttlSeconds });
+  return `ts_pass=${token}; Max-Age=${ttlSeconds}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+}
+async function checkKvPassToken(env, token, fingerprint) {
+  if (!token) return false;
+  const raw = await env.BOT_BLOCKER_KV.get(PASS_NS + token, { cacheTtl: 60 });
+  if (!raw) return false;
+  try {
+    const data = JSON.parse(raw);
+    if (data && data.fp && data.fp === fingerprint) return true;
+  } catch {}
+  return false;
 }
 
 function ipToBigInt(ip) {
