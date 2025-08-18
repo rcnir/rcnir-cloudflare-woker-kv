@@ -2,7 +2,7 @@
 name = "shopify-bot-blocker"
 account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
-compatibility_date = "2025-08-19"
+compatibility_date = "2025-08-18"
 
 # Cron Triggers
 [triggers]
