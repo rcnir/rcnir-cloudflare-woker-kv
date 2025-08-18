@@ -34,5 +34,8 @@ tag = "v5_add_fingerprint_tracker_sqlite" # 新しいマイグレーションの
 # new_classes の代わりに new_sqlite_classes を使用
 new_sqlite_classes = ["FingerprintTracker"] # 新たにDurable Objectとして登録するクラス名 (SQLite対応)
 
+# in wrangler.toml
 [vars]
 DO_RESET_KEY = "SHA256:ZjccL7lSATwvrpNpV6YbJVEiBAHEYRUyqfsg+z5v/bc"
+TURNSTILE_SITE_KEY = "0x4AAAAAABs5YEksrqKraRyG"
+TURNSTILE_SECRET_KEY = "0x4AAAAAABs5YEuxKtjRae0is8_1u-kJsdY"
