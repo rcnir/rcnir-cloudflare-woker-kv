@@ -1,6 +1,57 @@
 /*
  * =================================================================
- * (ヘッダーコメントは変更なし)
+ * 目次 (Table of Contents)
+ * =================================================================
+ * 1. エクスポートとメインハンドラ (Exports & Main Handlers)
+ * 2. メインロジック (Main Logic)
+ * 3. コアヘルパー関数 (Core Helper Functions)
+ * 4. ユーティリティ関数 (Utility Functions)
+ * =================================================================
+ */
+
+/*
+ * =================================================================
+ * 便利なターミナルコマンド (Useful Terminal Commands)
+ * =================================================================
+ *
+ * --- ログ監視 (Log Monitoring) ---
+ *
+ * ■ 全てのログを表示
+ * npx wrangler tail shopify-bot-blocker
+ *
+ * ■ TH判定 (信頼された人間) のみ表示
+ * npx wrangler tail shopify-bot-blocker | grep -F "[TH]"
+ *
+ * ■ SH判定 (不審な人間) のみ表示
+ * npx wrangler tail shopify-bot-blocker | grep -F "[SH]"
+ *
+ * ■ B判定 (ボット) のみ表示
+ * npx wrangler tail shopify-bot-blocker | grep -F "[B]"
+ *
+ * ■ VIOLATION (違反検知) のみ表示
+ * npx wrangler tail shopify-bot-blocker | grep "\[VIOLATION\]"
+ *
+ * --- KVストア管理 (KV Store Management) ---
+ *
+ * ■ ブロック中の全IP/FPを一覧表示
+ * npx wrangler kv key list --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb"
+ *
+ * ■ 特定のIP/FPのブロック状態を確認 (例: "192.0.2.1")
+ * npx wrangler kv key get --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb" "ここにIPアドレスかFPキーを入力"
+ *
+ * --- R2バケット管理 (R2 Bucket Management) ---
+ *
+ * ■ 永続ブロックされたボットの全ログファイル一覧を表示
+ * npx wrangler r2 object list rocaniiru-log
+ *
+ * ■ 特定のログファイルの中身を表示 (例: "192.0.2.1-a1b2c3d4-...")
+ * npx wrangler r2 object get rocaniiru-log "ここにファイル名を入力"
+ *
+ * --- デプロイ (Deployment) ---
+ *
+ * ■ WorkerをCloudflareにデプロイ
+ * npx wrangler deploy
+ *
  * =================================================================
  */
 
