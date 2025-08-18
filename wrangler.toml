@@ -6,7 +6,7 @@ compatibility_date = "2025-08-18"
 
 # Cron Triggers
 [triggers]
-crons = ["0 2 * * 1"] # 週に一度、悪質ボットリストを同期
+crons = ["0 2 * * 1"]
 
 # KV Namespaces
 [[kv_namespaces]]
@@ -18,24 +18,18 @@ id = "7da99382fc3945bd87bc65f55c9ea1fb"
 binding = "BLOCKLIST_R2"
 bucket_name = "rocaniiru-log"
 
-# Durable Object Bindings
+# ★ 変更: Durable Objectのクラス名をV2に変更
 [durable_objects]
 bindings = [
-  { name = "IP_STATE_TRACKER", class_name = "IPStateTracker" },
-  { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTracker" }
+  { name = "IP_STATE_TRACKER", class_name = "IPStateTrackerV2" },
+  { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTrackerV2" }
 ]
 
-# ★ 修正: Durable Objectのマイグレーションを新しい形式に変更
+# ★ 変更: マイグレーションをV2クラス用に更新
 [[migrations]]
-tag = "v7_switch_to_sqlite_backend" # 新しい一意なタグ
-new_sqlite_classes = ["IPStateTracker", "FingerprintTracker"]
+tag = "v8_migrate_to_sqlite_v2" # 新しい一意なタグ
+new_sqlite_classes = ["IPStateTrackerV2", "FingerprintTrackerV2"]
 
-# [vars]セクションには、公開しても安全な情報のみを記述します
+# [vars]セクション
 [vars]
 TURNSTILE_SITE_KEY = "0x4AAAAAABs5YEksrqKraRyG"
-
-# --- 重要 ---
-# 以下のシークレットキーは、`npx wrangler secret put` コマンドで設定します
-# TURNSTILE_SECRET_KEY
-# TURNSTILE_HMAC_SECRET
-# ADMIN_KEY
