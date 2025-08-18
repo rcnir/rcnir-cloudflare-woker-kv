@@ -65,8 +65,10 @@ export { FingerprintTracker };
 
 // キャッシュはモジュールスコープで一度だけ初期化
 let workerConfigCache = null;
-let asnBlocklistCache = null;
+let learnedBadBotsCache = null;
+let badBotDictionaryCache = null;
 let activeBadBotListCache = null;
+let asnBlocklistCache = null;
 
 export default {
   async fetch(request, env, ctx) {
@@ -136,41 +138,54 @@ export default {
 async function handle(request, env, ctx, logBuffer) {
   const url = new URL(request.url);
 
+  if (url.pathname === '/cf-turnstile/verify') {
+    return await handleTurnstileVerification(request, env);
+  }
+
   if (url.pathname.startsWith("/admin/") || url.pathname.startsWith("/reset-state") || url.pathname.startsWith("/debug/")) {
     return new Response(`Admin/Debug endpoint accessed: ${url.pathname}`, { status: 200 });
   }
-
-  // --- スコアリングシステム初期化 ---
-  if (workerConfigCache === null) {
-    const configJson = await env.BOT_BLOCKER_KV.get("WORKER_CONFIG");
-    workerConfigCache = configJson ? JSON.parse(configJson) : {};
-    logBuffer.push('[CONFIG] Loaded worker configuration from KV.');
-  }
-  const config = workerConfigCache;
-  let score = 0;
-  const signals = [];
 
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
   const path = url.pathname.toLowerCase();
   const fingerprint = await generateFingerprint(request, logBuffer);
 
-  // --- 1. 絶対的ブロック/許可ルール (スコアリング対象外) ---
+  // --- 1. Cookieホワイトリスト（最優先） ---
   const cookieHeader = request.headers.get("Cookie") || "";
   if (cookieHeader.includes("secret-pass=Rocaniru-Admin-Bypass-XYZ789")) {
-    logBuffer.push(`[WHITELIST] Bypassed scoring. IP=${ip}`);
+    logBuffer.push(`[WHITELIST] Access granted via secret cookie for IP=${ip} FP=${fingerprint}.`);
     return fetch(request);
   }
 
+  // --- 2. KVブロックリストチェック (違反カウントによるもの) ---
   const [ipStatus, fpStatus] = await Promise.all([
     env.BOT_BLOCKER_KV.get(ip, { cacheTtl: 300 }),
     env.BOT_BLOCKER_KV.get(`FP-${fingerprint}`, { cacheTtl: 300 })
   ]);
-  if (ipStatus === "permanent-block" || fpStatus === "permanent-block") {
-    logBuffer.push(`[PERMA-BLOCK] Blocked by permanent KV entry. IP=${ip}, FP=${fingerprint}`);
+  if (["permanent-block", "temp-1", "temp-2", "temp-3"].includes(ipStatus)) {
+    logBuffer.push(`[KV BLOCK] IP=${ip} status=${ipStatus}`);
+    return new Response("Not Found", { status: 404 });
+  }
+  if (["permanent-block", "temp-1", "temp-2", "temp-3"].includes(fpStatus)) {
+    logBuffer.push(`[KV BLOCK] FP=${fingerprint} status=${fpStatus}`);
     return new Response("Not Found", { status: 404 });
   }
 
+  // --- 3. ASNブロックリストチェック ---
+  const asn = request.cf?.asn;
+  if (asn) {
+    if (asnBlocklistCache === null) {
+      const blocklistJson = await env.BOT_BLOCKER_KV.get("ASN_BLOCKLIST");
+      asnBlocklistCache = blocklistJson ? JSON.parse(blocklistJson) : [];
+    }
+    if (asnBlocklistCache.includes(String(asn))) {
+      logBuffer.push(`[ASN BLOCK] ASN=${asn} is blocked.`);
+      return new Response("Forbidden", { status: 403 });
+    }
+  }
+  
+  // --- 4. KVベースのアクティブな悪質ボットリストによる即時ブロック ---
   if (activeBadBotListCache === null) {
     const listJson = await env.BOT_BLOCKER_KV.get("ACTIVE_BAD_BOT_LIST");
     activeBadBotListCache = new Set(listJson ? JSON.parse(listJson) : []);
@@ -183,6 +198,7 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
 
+  // --- 5. アセットファイルのスキップ処理 ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
   if (EXT_SKIP.test(path)) {
     const importantJsPatterns = [
@@ -200,80 +216,211 @@ async function handle(request, env, ctx, logBuffer) {
     return fetch(request);
   }
 
-  // --- 2. スコアリング開始 ---
+  // --- 6. 静的ルールによるパス探索型攻撃ブロック ---
+  const staticBlockPatterns = ["/wp-", ".php", "phpinfo", "phpmyadmin", "/.env", "/config", "/admin/", "/dbadmin", "/_profiler", ".aws", "credentials"];
+  if (staticBlockPatterns.some(patt => path.includes(patt))) {
+    return logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint, logBuffer);
+  }
+
+  // --- 7. UAベースの分類 (ラベル付け) ---
+  const safeBotPatterns = ["PetalBot"];
+  const botPattern = /\b(\w+bot|bot|crawl(er)?|spider|slurp|fetch|headless|preview|agent|scanner|client|curl|wget|python|perl|java|scrape(r)?|monitor|probe|archive|validator|feed)\b/i;
+  
+  let refinedLabel = "[H]";
   const ipTrackerId = env.IP_STATE_TRACKER.idFromName(ip);
   const ipTrackerStub = env.IP_STATE_TRACKER.get(ipTrackerId);
   const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint);
   const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
 
-  const fpStateRes = await fpTrackerStub.fetch(new Request("https://internal/get-state"));
-  let jsExecuted = false;
-  if (fpStateRes.ok) {
-    jsExecuted = (await fpStateRes.json()).jsExecuted;
+  if (botPattern.test(ua)) {
+    refinedLabel = "[B]";
+    if (safeBotPatterns.some(safeBot => ua.toLowerCase().includes(safeBot.toLowerCase()))) {
+      const res = await ipTrackerStub.fetch(new Request("https://internal/rate-limit", { headers: { "CF-Connecting-IP": ip } }));
+      if (res.ok) {
+        const { allowed } = await res.json();
+        if (!allowed) {
+          logBuffer.push(`[RATE LIMIT] SafeBot (${safeBotPatterns.find(s => ua.toLowerCase().includes(s.toLowerCase()))}) IP=${ip} blocked.`);
+          return new Response("Too Many Requests", { status: 429 });
+        }
+      }
+      refinedLabel = "[SAFE_BOT]";
+    }
+  }
+
+  if (refinedLabel === "[H]") {
+    const fpStateRes = await fpTrackerStub.fetch(new Request("https://internal/get-state", { headers: { "X-Fingerprint-ID": fingerprint } }));
+    if (fpStateRes.ok) {
+      const fpState = await fpStateRes.json();
+      refinedLabel = fpState.jsExecuted ? "[TH]" : "[SH]";
+    } else {
+      logBuffer.push(`[DO_ERROR] Failed to get FP state for ${fingerprint}. Status: ${fpStateRes.status}. Treating as SH.`);
+      refinedLabel = "[SH]";
+    }
+  }
+
+  logBuffer.push(`${refinedLabel} ${request.url} IP=${ip} UA=${ua} FP=${fingerprint}`);
+
+  if (refinedLabel === "[TH]" || refinedLabel === "[SAFE_BOT]") {
+    return fetch(request);
+  }
+
+  // --- 8. 有害Bot検知と学習 (ラベルがBの場合) ---
+  if (refinedLabel === "[B]") {
+    if (learnedBadBotsCache === null) {
+      const learnedList = await env.BOT_BLOCKER_KV.get("LEARNED_BAD_BOTS", { type: "json" });
+      learnedBadBotsCache = new Set(Array.isArray(learnedList) ? learnedList : []);
+    }
+    for (const patt of learnedBadBotsCache) {
+      const flexiblePatt = patt.replace(/^\^|\$$/g, '');
+      if (new RegExp(flexiblePatt, "i").test(ua)) {
+        const reason = `unwanted-bot(learned):${patt}`;
+        ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
+        return new Response("Not Found", { status: 404 });
+      }
+    }
+    
+    if (badBotDictionaryCache === null) {
+      const listJson = await env.BOT_BLOCKER_KV.get("SYSTEM_BAD_BOT_LIST");
+      badBotDictionaryCache = listJson ? JSON.parse(listJson) : [];
+    }
+    for (const patt of badBotDictionaryCache) {
+      const flexiblePatt = patt.replace(/^\^|\$$/g, ''); 
+      if (new RegExp(flexiblePatt, "i").test(ua)) {
+        const reason = `unwanted-bot(new):${patt}`;
+        ctx.waitUntil((async () => {
+          activeBadBotListCache.add(patt);
+          await env.BOT_BLOCKER_KV.put("ACTIVE_BAD_BOT_LIST", JSON.stringify(Array.from(activeBadBotListCache)));
+          logBuffer.push(`[LEARNED TO ACTIVE LIST] Added pattern to KV active list: ${patt}`);
+        })());
+        ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
+        return new Response("Not Found", { status: 404 });
+      }
+    }
   }
   
-  if (jsExecuted) {
-    logBuffer.push(`[TH] Trusted Human detected. Skipping scoring. IP=${ip}`);
-    return fetch(request);
-  } else {
-    score += config.scores?.jsNotExecuted || 0;
-    signals.push("js_not_executed");
-  }
-
-  const asn = request.cf?.asn;
-  if (asn) {
-    if (asnBlocklistCache === null) {
-      const blocklistJson = await env.BOT_BLOCKER_KV.get("ASN_BLOCKLIST");
-      asnBlocklistCache = blocklistJson ? JSON.parse(blocklistJson) : [];
+  // --- 9. スコア制による動的ルール実行 (ラベルがSHの場合) ---
+  if (refinedLabel === "[SH]") {
+    if (workerConfigCache === null) {
+      const configJson = await env.BOT_BLOCKER_KV.get("WORKER_CONFIG");
+      workerConfigCache = configJson ? JSON.parse(configJson) : {};
+      logBuffer.push('[CONFIG] Loaded worker configuration from KV.');
     }
-    if (asnBlocklistCache.includes(String(asn))) {
-      score += config.scores?.suspiciousAsn || 0;
-      signals.push(`suspicious_asn:${asn}`);
+    const config = workerConfigCache;
+    let score = 0;
+    const signals = [];
+
+    // ヘッダー分析
+    const secChUa = request.headers.get('Sec-Ch-Ua');
+    const acceptLanguage = request.headers.get('Accept-Language');
+    if (!secChUa && !acceptLanguage) {
+      score += config.scores?.missingHeadersFull || 20;
+      signals.push("missing_headers_full");
+    } else if (!secChUa || !acceptLanguage) {
+      score += config.scores?.missingHeadersPartial || 10;
+      signals.push("missing_headers_partial");
+    }
+
+    // ロケールチェック
+    const [ipLocaleRes, fpLocaleRes] = await Promise.all([
+        ipTrackerStub.fetch(new Request("https://internal/check-locale", { method: 'POST', headers: { "CF-Connecting-IP": ip, "Content-Type": "application/json" }, body: JSON.stringify({ path }) })),
+        fpTrackerStub.fetch(new Request("https://internal/check-locale-fp", { method: 'POST', headers: { "X-Fingerprint-ID": fingerprint, "Content-Type": "application/json" }, body: JSON.stringify({ path }) }))
+    ]);
+    if ((ipLocaleRes.ok && (await ipLocaleRes.json()).violation) || (fpLocaleRes.ok && (await fpLocaleRes.json()).violation)) {
+        score += config.scores?.localeFanout || 20;
+        signals.push("locale_fanout");
+    }
+
+    logBuffer.push(`[SH_SCORE] Score: ${score} | Signals: [${signals.join(', ')}]`);
+
+    // スコアに基づいてアクションを決定
+    if (score >= (config.thresholds?.challenge || 40)) {
+        logBuffer.push(`[TURNSTILE CHALLENGE] Triggered by score ${score} for IP=${ip}`);
+        return presentTurnstileChallenge(request, env);
     }
   }
-
-  const staticBlockPatterns = ["/wp-", ".php", "phpinfo", "phpmyadmin", "/.env", "/config", "/admin/", "/dbadmin", "/_profiler", ".aws", "credentials"];
-  if (staticBlockPatterns.some(patt => path.includes(patt))) {
-    score += config.scores?.staticAttackPattern || 0;
-    signals.push(`static_scan:${path}`);
-  }
-
-  const secChUa = request.headers.get('Sec-Ch-Ua');
-  const acceptLanguage = request.headers.get('Accept-Language');
-  if (!secChUa && !acceptLanguage) {
-    score += config.scores?.missingHeadersFull || 0;
-    signals.push("missing_headers_full");
-  } else if (!secChUa || !acceptLanguage) {
-    score += config.scores?.missingHeadersPartial || 0;
-    signals.push("missing_headers_partial");
-  }
-
-  const [ipLocaleRes, fpLocaleRes] = await Promise.all([
-    ipTrackerStub.fetch(new Request("https://internal/check-locale", { method: 'POST', headers: { "CF-Connecting-IP": ip, "Content-Type": "application/json" }, body: JSON.stringify({ path }) })),
-    fpTrackerStub.fetch(new Request("https://internal/check-locale-fp", { method: 'POST', headers: { "X-Fingerprint-ID": fingerprint, "Content-Type": "application/json" }, body: JSON.stringify({ path }) }))
-  ]);
-  if ((ipLocaleRes.ok && (await ipLocaleRes.json()).violation) || (fpLocaleRes.ok && (await fpLocaleRes.json()).violation)) {
-      score += config.scores?.localeFanout || 0;
-      signals.push("locale_fanout");
-  }
-
+  
+  // --- 10. Amazon Botなりすましチェック ---
   if (ua.startsWith("AmazonProductDiscovery/1.0")) {
     const isVerified = await verifyBotIp(ip, "amazon", env, logBuffer);
     if (!isVerified) {
-      score += config.scores?.crawlerImpersonation || 0;
-      signals.push("amazon_impersonation");
+      const reason = "amazon-impersonation";
+      ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
+      return new Response("Not Found", { status: 404 });
     }
   }
-  
-  // --- 3. 最終処理 ---
-  logBuffer.push(`[SCORE] Final Score: ${score} | Signals: [${signals.join(', ')}] | IP=${ip} | FP=${fingerprint}`);
-  logBuffer.push(`[UA] ${ua}`);
 
-  // フェーズ1では、スコアに基づいたアクションはまだ行わない
+  // --- 11. 全チェッククリア ---
   return fetch(request);
 }
 
+
 // --- 3. コアヘルパー関数 ---
+async function handleTurnstileVerification(request, env) {
+    const url = new URL(request.url);
+    const redirectUrl = url.searchParams.get('redirect_to');
+    
+    const formData = await request.formData();
+    const token = formData.get('cf-turnstile-response');
+    const ip = request.headers.get('CF-Connecting-IP');
+
+    let validationResponse = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+            secret: env.TURNSTILE_SECRET_KEY,
+            response: token,
+            remoteip: ip,
+        }),
+    });
+    const outcome = await validationResponse.json();
+
+    if (outcome.success) {
+        if (redirectUrl) {
+            return Response.redirect(redirectUrl, 302);
+        }
+        return new Response("Human verification successful. Redirect URL not found.", { status: 200 });
+    }
+    
+    return new Response("Human verification failed. Please try again.", { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+}
+
+function presentTurnstileChallenge(request, env) {
+    const originalUrl = request.url;
+    const siteKey = env.TURNSTILE_SITE_KEY;
+    const html = `
+      <!DOCTYPE html>
+      <html lang="ja">
+      <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>接続を確認しています...</title>
+          <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+          <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f1f2f3; color: #333; }
+              .container { text-align: center; padding: 2em; background-color: white; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+              h1 { font-size: 1.2em; margin-bottom: 0.5em; }
+              p { margin-top: 0; color: #666; }
+          </style>
+      </head>
+      <body>
+          <div class="container">
+              <h1>接続が安全であることを確認しています</h1>
+              <p>この処理は自動で行われます。しばらくお待ちください。</p>
+              <form id="turnstile-form" action="/cf-turnstile/verify?redirect_to=${encodeURIComponent(originalUrl)}" method="POST">
+                  <div class="cf-turnstile" data-sitekey="${siteKey}" data-callback="onTurnstileSuccess"></div>
+              </form>
+          </div>
+          <script>
+            function onTurnstileSuccess(token) {
+              document.getElementById('turnstile-form').submit();
+            }
+          </script>
+      </body>
+      </html>
+    `;
+    return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
 async function handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fingerprint, fpCount, logBuffer) {
   logBuffer.push(`[VIOLATION] IP=${ip} FP=${fingerprint} reason=${reason} IP_count=${ipCount} FP_count=${fpCount}`);
   const effectiveCount = Math.max(ipCount, fpCount);
