@@ -20,7 +20,7 @@
  * npx wrangler tail shopify-bot-blocker
  *
  * ■ TH判定 (信頼された人間) のみ表示
- * npx wrangler tail shop-bot-blocker | grep -F "[TH]"
+ * npx wrangler tail shopify-bot-blocker | grep -F "[TH]"
  *
  * ■ SH判定 (不審な人間) のみ表示
  * npx wrangler tail shopify-bot-blocker | grep -F "[SH]"
@@ -54,6 +54,7 @@
  *
  * =================================================================
  */
+
 // --- 1. エクスポートとメインハンドラ ---
 
 import { IPStateTracker } from "./do/IPStateTracker.js";
@@ -64,8 +65,8 @@ export { FingerprintTracker };
 
 // キャッシュはモジュールスコープで一度だけ初期化
 let learnedBadBotsCache = null;
-let badBotDictionaryCache = null; // KVの悪質ボットリストのメモリキャッシュ
-let activeBadBotListCache = null; // KVのアクティブな悪質ボットリストのメモリキャッシュ
+let badBotDictionaryCache = null;
+let activeBadBotListCache = null;
 let asnBlocklistCache = null;
 
 export default {
@@ -138,6 +139,10 @@ export default {
 async function handle(request, env, ctx, logBuffer) {
   const url = new URL(request.url);
 
+  if (url.pathname === '/cf-turnstile/verify') {
+    return await handleTurnstileVerification(request, env);
+  }
+
   if (url.pathname.startsWith("/admin/") || url.pathname.startsWith("/reset-state") || url.pathname.startsWith("/debug/")) {
     return new Response(`Admin/Debug endpoint accessed: ${url.pathname}`, { status: 200 });
   }
@@ -181,7 +186,7 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
   
-  // --- 4. KVベースの悪質ボットリストによる即時ブロック ---
+  // --- 4. KVベースのアクティブな悪質ボットリストによる即時ブロック ---
   if (activeBadBotListCache === null) {
     const listJson = await env.BOT_BLOCKER_KV.get("ACTIVE_BAD_BOT_LIST");
     activeBadBotListCache = new Set(listJson ? JSON.parse(listJson) : []);
@@ -205,6 +210,7 @@ async function handle(request, env, ctx, logBuffer) {
       /^\/cdn\/shopify\/s\/files\/.*\.js(\?|$)/,
     ];
     if (importantJsPatterns.some(pattern => pattern.test(path))) {
+      logBuffer.push(`[JS_DETECTED] Important JS request detected for FP=${fingerprint}. Path: ${path}`);
       const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint);
       const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
       ctx.waitUntil(fpTrackerStub.fetch(new Request("https://internal/record-js-execution", {
@@ -298,28 +304,48 @@ async function handle(request, env, ctx, logBuffer) {
   
   // --- 9. 動的ルール実行 (ラベルがSHの場合) ---
   if (refinedLabel === "[SH]") {
+    // ヘッダー分析
     const secChUa = request.headers.get('Sec-Ch-Ua');
     const acceptLanguage = request.headers.get('Accept-Language');
     if (!secChUa && !acceptLanguage) {
       const reason = "missing-headers-on-sh";
-      ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
-      logBuffer.push(`[HEADER BLOCK] IP=${ip} FP=${fingerprint} reason=${reason} UA=${ua}`);
-      return new Response("Forbidden", { status: 403 });
+      logBuffer.push(`[TURNSTILE CHALLENGE] Triggered by ${reason} for IP=${ip} FP=${fingerprint}`);
+      return presentTurnstileChallenge(request, env);
     }
 
+    // ロケールチェック
     const [ipLocaleRes, fpLocaleRes] = await Promise.all([
         ipTrackerStub.fetch(new Request("https://internal/check-locale", { method: 'POST', headers: { "CF-Connecting-IP": ip, "Content-Type": "application/json" }, body: JSON.stringify({ path }) })),
         fpTrackerStub.fetch(new Request("https://internal/check-locale-fp", { method: 'POST', headers: { "X-Fingerprint-ID": fingerprint, "Content-Type": "application/json" }, body: JSON.stringify({ path }) }))
     ]);
     
-    let violationDetected = false, ipCount = 0, fpCount = 0, reason = "locale-fanout";
+    let violationDetected = false;
+    let ipCount = 0;
+    let fpCount = 0;
+    const reason = "locale-fanout";
     
-    if (ipLocaleRes.ok) { const { violation, count } = await ipLocaleRes.json(); if (violation) { violationDetected = true; ipCount = count; } } else { logBuffer.push(`[DO_ERROR] IP /check-locale failed for IP=${ip}.`); }
-    if (fpLocaleRes.ok) { const { violation, count } = await fpLocaleRes.json(); if (violation) { violationDetected = true; fpCount = count; } } else { logBuffer.push(`[DO_ERROR] FP /check-locale-fp failed for FP=${fingerprint}.`); }
+    if (ipLocaleRes.ok) { 
+        const { violation, count } = await ipLocaleRes.json(); 
+        if (violation) { 
+            violationDetected = true; 
+            ipCount = count; 
+        } 
+    } else { 
+        logBuffer.push(`[DO_ERROR] IP /check-locale failed for IP=${ip}. Status: ${ipLocaleRes.status}`); 
+    }
+    if (fpLocaleRes.ok) { 
+        const { violation, count } = await fpLocaleRes.json(); 
+        if (violation) { 
+            violationDetected = true; 
+            fpCount = count; 
+        } 
+    } else { 
+        logBuffer.push(`[DO_ERROR] FP /check-locale-fp failed for FP=${fingerprint}. Status: ${fpLocaleRes.status}`); 
+    }
     
     if (violationDetected) {
-      await handleViolationSideEffects(ip, ua, reason, Math.max(ipCount, fpCount), env, ctx, fingerprint, fpCount, logBuffer);
-      return new Response("Not Found", { status: 404 });
+      logBuffer.push(`[TURNSTILE CHALLENGE] Triggered by ${reason} for IP=${ip} FP=${fingerprint}`);
+      return presentTurnstileChallenge(request, env);
     }
   }
   
@@ -339,6 +365,75 @@ async function handle(request, env, ctx, logBuffer) {
 
 
 // --- 3. コアヘルパー関数 ---
+
+// Turnstileチャレンジページを生成する関数
+function presentTurnstileChallenge(request, env) {
+    const originalUrl = request.url;
+    const siteKey = env.TURNSTILE_SITE_KEY;
+    const html = `
+      <!DOCTYPE html>
+      <html lang="ja">
+      <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>接続を確認しています...</title>
+          <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+          <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f1f2f3; color: #333; }
+              .container { text-align: center; padding: 2em; background-color: white; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+              h1 { font-size: 1.2em; margin-bottom: 0.5em; }
+              p { margin-top: 0; color: #666; }
+          </style>
+      </head>
+      <body>
+          <div class="container">
+              <h1>接続が安全であることを確認しています</h1>
+              <p>この処理は自動で行われます。しばらくお待ちください。</p>
+              <form id="turnstile-form" action="/cf-turnstile/verify?redirect_to=${encodeURIComponent(originalUrl)}" method="POST">
+                  <div class="cf-turnstile" data-sitekey="${siteKey}" data-callback="onTurnstileSuccess"></div>
+              </form>
+          </div>
+          <script>
+            function onTurnstileSuccess(token) {
+              document.getElementById('turnstile-form').submit();
+            }
+          </script>
+      </body>
+      </html>
+    `;
+    return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
+// Turnstileの検証を処理する関数
+async function handleTurnstileVerification(request, env) {
+    const url = new URL(request.url);
+    const redirectUrl = url.searchParams.get('redirect_to');
+    
+    const formData = await request.formData();
+    const token = formData.get('cf-turnstile-response');
+    const ip = request.headers.get('CF-Connecting-IP');
+
+    let validationResponse = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+            secret: env.TURNSTILE_SECRET_KEY,
+            response: token,
+            remoteip: ip,
+        }),
+    });
+    const outcome = await validationResponse.json();
+
+    if (outcome.success) {
+        if (redirectUrl) {
+            return Response.redirect(redirectUrl, 302);
+        }
+        return new Response("Human verification successful. Redirect URL not found.", { status: 200 });
+    }
+    
+    return new Response("Human verification failed. Please try again.", { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+}
+
 
 async function handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fingerprint, fpCount, logBuffer) {
   logBuffer.push(`[VIOLATION] IP=${ip} FP=${fingerprint} reason=${reason} IP_count=${ipCount} FP_count=${fpCount}`);
