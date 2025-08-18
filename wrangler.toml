@@ -28,3 +28,4 @@ new_sqlite_classes = ["IPStateTrackerV2", "FingerprintTrackerV2"]
 
 [vars]
 TURNSTILE_SITE_KEY = "0x4AAAAAABs5YEksrqKraRyG"
+
