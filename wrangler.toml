@@ -1,3 +1,4 @@
+# wrangler.toml
 name = "shopify-bot-blocker"
 account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
@@ -14,18 +15,19 @@ id = "7da99382fc3945bd87bc65f55c9ea1fb"
 binding = "BLOCKLIST_R2"
 bucket_name = "rocaniiru-log"
 
-# V2 クラス名で公開する（toml とエクスポート名を一致させる）
 [durable_objects]
 bindings = [
   { name = "IP_STATE_TRACKER", class_name = "IPStateTrackerV2" },
   { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTrackerV2" }
 ]
 
-# 新規クラス名に対してのみ SQLite マイグレーションを適用
+# ここが重要：旧クラス名→新クラス名への “rename” のみを追加
 [[migrations]]
-tag = "v8_migrate_to_sqlite_v2"
-new_sqlite_classes = ["IPStateTrackerV2", "FingerprintTrackerV2"]
+tag = "v9_rename_classes_v1_to_v2"
+renamed_classes = [
+  { from = "IPStateTracker", to = "IPStateTrackerV2" },
+  { from = "FingerprintTracker", to = "FingerprintTrackerV2" }
+]
 
 [vars]
 TURNSTILE_SITE_KEY = "0x4AAAAAABs5YEksrqKraRyG"
-
