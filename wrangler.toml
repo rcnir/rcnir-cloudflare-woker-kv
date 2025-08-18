@@ -2,41 +2,44 @@
 name = "shopify-bot-blocker"
 account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
-compatibility_date = "2025-07-18"
-
-# workers_dev = true # テスト用
+compatibility_date = "2025-08-19"
 
 # Cron Triggers
 [triggers]
-crons = ["*/30 * * * *"]
+crons = ["0 2 * * 1"] # 週に一度、悪質ボットリストを同期
 
-# KV 名前空間
+# KV Namespaces
 [[kv_namespaces]]
 binding = "BOT_BLOCKER_KV"
 id = "7da99382fc3945bd87bc65f55c9ea1fb"
 
-# 不要になった LOCALE_FANOUT の定義を削除
-
-# R2 バケット
+# R2 Buckets
 [[r2_buckets]]
 binding = "BLOCKLIST_R2"
 bucket_name = "rocaniiru-log"
 
-# Durable Object (名前とクラス名を変更)
+# Durable Object Bindings
 [durable_objects]
 bindings = [
   { name = "IP_STATE_TRACKER", class_name = "IPStateTracker" },
-  { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTracker" } # ★ この行を追加してください ★
+  { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTracker" }
 ]
 
-# wrangler.toml の末尾などに追加
+# Durable Object Migrations
 [[migrations]]
-tag = "v6_switch_to_score_system" # 以前のマイグレーションタグとは違う、一意なタグ
+tag = "v6_switch_to_score_system"
 delete_classes = ["IPStateTracker", "FingerprintTracker"]
 new_classes = ["IPStateTracker", "FingerprintTracker"]
 
-# in wrangler.toml
+# [vars]セクションには、公開しても安全な情報のみを記述します
 [vars]
-DO_RESET_KEY = "SHA256:ZjccL7lSATwvrpNpV6YbJVEiBAHEYRUyqfsg+z5v/bc"
 TURNSTILE_SITE_KEY = "0x4AAAAAABs5YEksrqKraRyG"
-TURNSTILE_SECRET_KEY = "0x4AAAAAABs5YEuxKtjRae0is8_1u-kJsdY"
+
+# --- 重要 ---
+# 以下のシークレットキーは、安全のためこのファイルには記述しません。
+# これらは既に `npx wrangler secret put` コマンドでCloudflareに設定済みです。
+#
+# TURNSTILE_SECRET_KEY
+# TURNSTILE_HMAC_SECRET
+# ADMIN_KEY
+# DO_RESET_KEY
