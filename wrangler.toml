@@ -1,33 +1,50 @@
-# wrangler.toml
 name = "shopify-bot-blocker"
 account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
 compatibility_date = "2025-08-18"
 
+# Cron Triggers
 [triggers]
-crons = ["0 2 * * 1"]
+crons = ["0 2 * * 1"] # 週に一度、悪質ボットリストを同期
 
+# KV Namespaces
 [[kv_namespaces]]
 binding = "BOT_BLOCKER_KV"
 id = "7da99382fc3945bd87bc65f55c9ea1fb"
 
+# R2 Buckets
 [[r2_buckets]]
 binding = "BLOCKLIST_R2"
 bucket_name = "rocaniiru-log"
 
+# Durable Object Bindings
 [durable_objects]
 bindings = [
   { name = "IP_STATE_TRACKER", class_name = "IPStateTrackerV2" },
   { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTrackerV2" }
 ]
 
-# ここが重要：旧クラス名→新クラス名への “rename” のみを追加
+# マイグレーション履歴
+# 1段階目: クラス名を V2 にリネーム
 [[migrations]]
-tag = "v9_rename_classes_v1_to_v2"
-renamed_classes = [
-  { from = "IPStateTracker", to = "IPStateTrackerV2" },
-  { from = "FingerprintTracker", to = "FingerprintTrackerV2" }
-]
+tag = "v9_rename_classes_to_v2"
+rename_class = { from = "IPStateTracker", to = "IPStateTrackerV2" }
 
+[[migrations]]
+tag = "v9_rename_classes_to_v2_fp"
+rename_class = { from = "FingerprintTracker", to = "FingerprintTrackerV2" }
+
+# 2段階目: SQLite バックエンドへ移行
+[[migrations]]
+tag = "v10_switch_to_sqlite_backend"
+migrate_sqlite_classes = ["IPStateTrackerV2", "FingerprintTrackerV2"]
+
+# 環境変数 (公開しても安全な情報のみ)
 [vars]
 TURNSTILE_SITE_KEY = "0x4AAAAAABs5YEksrqKraRyG"
+
+# --- 重要 ---
+# 以下のシークレットキーは、`npx wrangler secret put` コマンドで設定してください
+# TURNSTILE_SECRET_KEY
+# TURNSTILE_HMAC_SECRET
+# ADMIN_KEY
