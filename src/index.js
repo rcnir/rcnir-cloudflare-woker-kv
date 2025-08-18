@@ -55,11 +55,11 @@
 
 // --- 1. エクスポートとメインハンドラ ---
 
-import { IPStateTracker } from "./do/IPStateTracker.js";
-import { FingerprintTracker, generateFingerprint } from "./do/FingerprintTracker.js";
+import { IPStateTrackerV2 } from "./do/IPStateTracker.js";
+import { FingerprintTrackerV2, generateFingerprint } from "./do/FingerprintTracker.js";
 
-export { IPStateTracker };
-export { FingerprintTracker };
+export { IPStateTrackerV2 };
+export { FingerprintTrackerV2 };
 
 // キャッシュはモジュールスコープで一度だけ初期化
 let workerConfigCache = null;
