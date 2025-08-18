@@ -1,19 +1,6 @@
 /*
  * =================================================================
- * 目次 (Table of Contents)
- * =================================================================
- * 1. エクスポートとメインハンドラ (Exports & Main Handlers)
- * 2. メインロジック (Main Logic)
- * 3. コアヘルパー関数 (Core Helper Functions)
- * 4. ユーティリティ関数 (Utility Functions)
- * =================================================================
- */
-
-/*
- * =================================================================
- * 便利なターミナルコマンド (Useful Terminal Commands)
- * =================================================================
- * (コマンド一覧は変更なし)
+ * (ヘッダーコメントは変更なし)
  * =================================================================
  */
 
@@ -30,6 +17,7 @@ let workerConfigCache = null;
 let learnedBadBotsCache = null;
 let badBotDictionaryCache = null;
 let activeBadBotListCache = null;
+let activeBadBotListLastRead = 0; // ★改善点: 自動再読込用のタイムスタンプ
 let asnBlocklistCache = null;
 
 export default {
@@ -47,6 +35,8 @@ export default {
 
   async scheduled(event, env, ctx) {
     console.log("Cron Trigger fired: Syncing lists...");
+
+    // bad-bots.txt のR2->KV同期
     const object = await env.BLOCKLIST_R2.get("dictionaries/bad-bots.txt");
     if (object) {
       const text = await object.text();
@@ -57,6 +47,8 @@ export default {
       console.error("Failed to get bad-bots.txt from R2.");
     }
     
+    // ★重要修正: 現在のDOにはlist-high-countがないため、このブロックを一時的に無効化
+    /* TODO: スコアベースの永続ブロックロジックを再設計する際に、この機能を復活させる
     console.log("Syncing permanent block list...");
     const id = env.IP_STATE_TRACKER.idFromName("sync-job");
     const stub = env.IP_STATE_TRACKER.get(id);
@@ -91,6 +83,7 @@ export default {
     } else {
       console.log("No new Fingerprints to permanently block.");
     }
+    */
   }
 };
 
@@ -134,9 +127,13 @@ async function handle(request, env, ctx, logBuffer) {
     return new Response("Not Found", { status: 404 });
   }
 
-  if (activeBadBotListCache === null) {
+  // ★改善点: アクティブ悪質ボットリストの自動再読込
+  const now = Date.now();
+  if (activeBadBotListCache === null || now - activeBadBotListLastRead > 600000) { // 10分ごとに再読み込み
     const listJson = await env.BOT_BLOCKER_KV.get("ACTIVE_BAD_BOT_LIST");
     activeBadBotListCache = new Set(listJson ? JSON.parse(listJson) : []);
+    activeBadBotListLastRead = now;
+    logBuffer.push('[CONFIG] Reloaded active bad bot list from KV.');
   }
   for (const patt of activeBadBotListCache) {
     try {
@@ -319,7 +316,6 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
   
-  // ★ 最終改善: Amazonなりすまし検証を最終ガードとして配置
   if (ua.startsWith("AmazonProductDiscovery/1.0")) {
     const isVerified = await verifyBotIp(ip, "amazon", env, logBuffer);
     if (!isVerified) {
@@ -369,7 +365,9 @@ function presentTurnstileChallenge(request, env, fingerprint) {
     const html = `
       <!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>接続を確認しています...</title><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-      <meta name="robots" content="noindex,nofollow"><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background-color:#f1f2f3;color:#333;}.container{text-align:center;padding:2em;background-color:white;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.1);}h1{font-size:1.2em;margin-bottom:0.5em;}p{margin-top:0;color:#666;}</style>
+      <meta name="robots" content="noindex,nofollow">
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://challenges.cloudflare.com; connect-src https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'">
+      <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background-color:#f1f2f3;color:#333;}.container{text-align:center;padding:2em;background-color:white;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.1);}h1{font-size:1.2em;margin-bottom:0.5em;}p{margin-top:0;color:#666;}</style>
       </head><body><div class="container"><h1>接続が安全であることを確認しています</h1><p>この処理は自動で行われます。しばらくお待ちください。</p>
       <form id="turnstile-form" action="/cf-turnstile/verify?redirect_to=${encodeURIComponent(originalUrl)}" method="POST">
       <input type="hidden" name="fp" value="${fingerprint}">
