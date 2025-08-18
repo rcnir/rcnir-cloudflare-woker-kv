@@ -46,7 +46,7 @@ export async function generateFingerprint(request, logBuffer) {
     return fingerprint;
 }
 
-export class FingerprintTracker {
+export class FingerprintTrackerV2 {
   constructor(state, env) {
     this.state = state;
     this.env = env;
