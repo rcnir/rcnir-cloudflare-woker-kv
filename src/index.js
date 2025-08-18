@@ -194,6 +194,7 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
 
+  
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
   if (EXT_SKIP.test(path)) {
     const importantJsPatterns = [
