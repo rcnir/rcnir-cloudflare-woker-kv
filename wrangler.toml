@@ -25,21 +25,17 @@ bindings = [
   { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTracker" }
 ]
 
-# Durable Object Migrations
+# ★ 修正: Durable Objectのマイグレーションを新しい形式に変更
 [[migrations]]
-tag = "v6_switch_to_score_system"
-delete_classes = ["IPStateTracker", "FingerprintTracker"]
-new_classes = ["IPStateTracker", "FingerprintTracker"]
+tag = "v7_switch_to_sqlite_backend" # 新しい一意なタグ
+new_sqlite_classes = ["IPStateTracker", "FingerprintTracker"]
 
 # [vars]セクションには、公開しても安全な情報のみを記述します
 [vars]
 TURNSTILE_SITE_KEY = "0x4AAAAAABs5YEksrqKraRyG"
 
 # --- 重要 ---
-# 以下のシークレットキーは、安全のためこのファイルには記述しません。
-# これらは既に `npx wrangler secret put` コマンドでCloudflareに設定済みです。
-#
+# 以下のシークレットキーは、`npx wrangler secret put` コマンドで設定します
 # TURNSTILE_SECRET_KEY
 # TURNSTILE_HMAC_SECRET
 # ADMIN_KEY
-# DO_RESET_KEY
