@@ -1,35 +1,30 @@
-# wrangler.toml
 name = "shopify-bot-blocker"
 account_id = "d704bf18761786d3e83701e3857f1afe"
 main = "src/index.js"
 compatibility_date = "2025-08-18"
 
-# Cron Triggers
 [triggers]
 crons = ["0 2 * * 1"]
 
-# KV Namespaces
 [[kv_namespaces]]
 binding = "BOT_BLOCKER_KV"
 id = "7da99382fc3945bd87bc65f55c9ea1fb"
 
-# R2 Buckets
 [[r2_buckets]]
 binding = "BLOCKLIST_R2"
 bucket_name = "rocaniiru-log"
 
-# ★ 変更: Durable Objectのクラス名をV2に変更
+# V2 クラス名で公開する（toml とエクスポート名を一致させる）
 [durable_objects]
 bindings = [
   { name = "IP_STATE_TRACKER", class_name = "IPStateTrackerV2" },
   { name = "FINGERPRINT_TRACKER", class_name = "FingerprintTrackerV2" }
 ]
 
-# ★ 変更: マイグレーションをV2クラス用に更新
+# 新規クラス名に対してのみ SQLite マイグレーションを適用
 [[migrations]]
-tag = "v8_migrate_to_sqlite_v2" # 新しい一意なタグ
+tag = "v8_migrate_to_sqlite_v2"
 new_sqlite_classes = ["IPStateTrackerV2", "FingerprintTrackerV2"]
 
-# [vars]セクション
 [vars]
 TURNSTILE_SITE_KEY = "0x4AAAAAABs5YEksrqKraRyG"
