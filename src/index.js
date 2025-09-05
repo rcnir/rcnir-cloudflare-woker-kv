@@ -62,33 +62,45 @@ export { FingerprintTrackerV2 };
 
 // キャッシュはモジュールスコープで一度だけ初期化
 let workerConfigCache = null;
-let workerConfigCacheLastRead = 0; // ★A: WORKER_CONFIG を10分キャッシュ
 let learnedBadBotsCache = null;
 let badBotDictionaryCache = null;
 let activeBadBotListCache = null;
 let activeBadBotListLastRead = 0; // ★改善点: 自動再読込用のタイムスタンプ
 let asnBlocklistCache = null;
 
-// ★追加: KV 読みの Cache API / メモリ短期キャッシュ
+// ★追加: KV 読みの Cache API / メモリ短期キャッシュ + ネガティブキャッシュ
 const __memCache = new Map(); // key -> { val, exp }
+const __negCache = new Map(); // key -> expiration(ms)  未登録キーの安全メモ
+const NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000; // 10分間は「未登録=安全」を再確認しない
+
 async function getBlockStatusCached(env, key) {
   const now = Date.now();
+
+  // 1) ネガティブキャッシュ（未登録キーの安全メモ）
+  const negExp = __negCache.get(key);
+  if (negExp && negExp > now) return ""; // 未登録扱いを即返す
+
+  // 2) プロセスメモリ（ヒットなら最速）
   const m = __memCache.get(key);
   if (m && m.exp > now) return m.val;
 
+  // 3) Cache API（エッジ共有キャッシュ）
   const cache = caches.default;
-  const req = new Request('https://kv-cache.local/block/' + encodeURIComponent(key));
+  const req = new Request("https://kv-cache.local/block/" + encodeURIComponent(key));
   const hit = await cache.match(req);
   if (hit) {
     const val = await hit.text();
-    __memCache.set(key, { val, exp: now + 60_000 }); // プロセス内 60秒
+    __memCache.set(key, { val, exp: now + 60_000 }); // 60秒
+    // 空文字（=未登録）ならネガティブキャッシュにも載せる
+    if (!val) __negCache.set(key, now + NEGATIVE_CACHE_TTL_MS);
     return val;
   }
 
-  // 初回のみ KV を実読込（以降は Cache API/メモリ）
-  const val = (await env.BOT_BLOCKER_KV.get(key, { cacheTtl: 300 })) || '';
-  await cache.put(req, new Response(val, { headers: { 'Cache-Control': 'max-age=300' }})); // 5分キャッシュ
+  // 4) KV 実読込（初回のみ）
+  const val = (await env.BOT_BLOCKER_KV.get(key, { cacheTtl: 300 })) || "";
+  await cache.put(req, new Response(val, { headers: { "Cache-Control": "max-age=300" } })); // 5分共有
   __memCache.set(key, { val, exp: now + 60_000 });
+  if (!val) __negCache.set(key, now + NEGATIVE_CACHE_TTL_MS);
   return val;
 }
 
@@ -187,7 +199,7 @@ async function handle(request, env, ctx, logBuffer) {
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
   const path = url.pathname.toLowerCase();
-  // ★B: generateFingerprint を遅延（Cookie白・アセット除外の後に実行）
+  const fingerprint = await generateFingerprint(request, logBuffer);
 
   // --- 1) Cookie ホワイトリスト（最優先）
   const cookieHeader = request.headers.get("Cookie") || "";
@@ -199,14 +211,12 @@ async function handle(request, env, ctx, logBuffer) {
   // --- 2) ★改善: アセットは KV 読み込みより前に即返す ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
   if (EXT_SKIP.test(path)) {
-    // 重要JSの実行トラッキングは維持（この場合のみ指紋を生成して送信）
     const importantJsPatterns = [
       /^\/\.well-known\/shopify\/monorail\//, /^\/\.well-known\/shopify\/monorail\/unstable\/produce_batch/,
       /^\/cdn\/shopifycloud\/privacy-banner\/storefront-banner\.js/, /^\/cart\.js/,
       /^\/cdn\/shop\/t\/\d+\/assets\/theme\.min\.js(\?|$)/,
     ];
     if (importantJsPatterns.some(pattern => pattern.test(path))) {
-      const fingerprint = await generateFingerprint(request, logBuffer);
       const fpTrackerId = env.FINGERPRINT_TRACKER.idFromName(fingerprint);
       const fpTrackerStub = env.FINGERPRINT_TRACKER.get(fpTrackerId);
       ctx.waitUntil(fpTrackerStub.fetch(new Request("https://internal/record-js-execution", {
@@ -216,10 +226,7 @@ async function handle(request, env, ctx, logBuffer) {
     return fetch(request);
   }
 
-  // --- 3) ★ここで初めて指紋を生成（Bの適用）---
-  const fingerprint = await generateFingerprint(request, logBuffer);
-
-  // --- 4) KV ブロック状態チェック（★Cache API＋メモリで Read 削減） ---
+  // --- 3) KV ブロック状態チェック（★Cache API＋メモリ＋ネガティブキャッシュ）
   const [ipStatus, fpStatus] = await Promise.all([
     getBlockStatusCached(env, ip),
     getBlockStatusCached(env, `FP-${fingerprint}`)
@@ -243,8 +250,7 @@ async function handle(request, env, ctx, logBuffer) {
   }
   for (const patt of activeBadBotListCache) {
     try {
-      const flexiblePatt = patt; // 既に ^$ を含む想定のためそのまま使う
-      if (new RegExp(flexiblePatt, "i").test(ua)) {
+      if (new RegExp(patt, "i").test(ua)) {
         logBuffer.push(`[ACTIVE BAD BOT BLOCK] UA matched active list rule: ${patt}`);
         return new Response("Forbidden", { status: 403 });
       }
@@ -359,14 +365,11 @@ async function handle(request, env, ctx, logBuffer) {
         return fetch(request);
     }
     
-    // ★A: WORKER_CONFIG を10分ごとにだけ再読込
-    const now2 = Date.now();
-    if (workerConfigCache === null || (now2 - workerConfigCacheLastRead) > 600000) {
-      const kvConfig = await env.BOT_BLOCKER_KV.get("WORKER_CONFIG", { type: "json" }) ?? {};
-      workerConfigCache = kvConfig;
-      workerConfigCacheLastRead = now2;
-      const v = kvConfig && typeof kvConfig.version !== 'undefined' ? kvConfig.version : 'none';
-      logBuffer.push(`[CONFIG] Reloaded worker configuration to version ${v}.`);
+    const kvConfig = await env.BOT_BLOCKER_KV.get("WORKER_CONFIG", { type: "json" }) ?? {};
+    if (workerConfigCache === null || (kvConfig && workerConfigCache.version !== kvConfig.version)) {
+        workerConfigCache = kvConfig;
+        const v = kvConfig && typeof kvConfig.version !== 'undefined' ? kvConfig.version : 'none';
+        logBuffer.push(`[CONFIG] Hot reloaded worker configuration to version ${v}.`);
     }
     const config = workerConfigCache;
     let score = 0;
