@@ -68,6 +68,38 @@ let activeBadBotListCache = null;
 let activeBadBotListLastRead = 0; // ★改善点: 自動再読込用のタイムスタンプ
 let asnBlocklistCache = null;
 
+// ★追加: KV 読みの Cache API / メモリ短期キャッシュ
+const __memCache = new Map(); // key -> { val, exp }
+async function getBlockStatusCached(env, key) {
+  const now = Date.now();
+  const m = __memCache.get(key);
+  if (m && m.exp > now) return m.val;
+
+  const cache = caches.default;
+  const req = new Request('https://kv-cache.local/block/' + encodeURIComponent(key));
+  const hit = await cache.match(req);
+  if (hit) {
+    const val = await hit.text();
+    __memCache.set(key, { val, exp: now + 60_000 }); // プロセス内 60秒
+    return val;
+  }
+
+  // 初回のみ KV を実読込（以降は Cache API/メモリ）
+  const val = (await env.BOT_BLOCKER_KV.get(key, { cacheTtl: 300 })) || '';
+  await cache.put(req, new Response(val, { headers: { 'Cache-Control': 'max-age=300' }})); // 5分キャッシュ
+  __memCache.set(key, { val, exp: now + 60_000 });
+  return val;
+}
+
+// ★追加: KV 書き込みデバウンス（連続 put を抑止）
+const __recentPuts = new Map(); // key -> exp
+async function putOnce(env, key, val, ttl) {
+  const now = Date.now();
+  if (__recentPuts.get(key) > now) return;
+  __recentPuts.set(key, now + 30_000); // 30秒は同一キー再書込しない
+  await env.BOT_BLOCKER_KV.put(key, val, { expirationTtl: ttl });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const logBuffer = [];
@@ -156,45 +188,14 @@ async function handle(request, env, ctx, logBuffer) {
   const path = url.pathname.toLowerCase();
   const fingerprint = await generateFingerprint(request, logBuffer);
 
+  // --- 1) Cookie ホワイトリスト（最優先）
   const cookieHeader = request.headers.get("Cookie") || "";
   if (cookieHeader.includes("secret-pass=Rocaniru-Admin-Bypass-XYZ789")) {
     logBuffer.push(`[WHITELIST] Access granted via secret cookie for IP=${ip}`);
     return fetch(request);
   }
 
-  const [ipStatus, fpStatus] = await Promise.all([
-    env.BOT_BLOCKER_KV.get(ip, { cacheTtl: 300 }),
-    env.BOT_BLOCKER_KV.get(`FP-${fingerprint}`, { cacheTtl: 300 })
-  ]);
-  if (["permanent-block", "temp-1", "temp-2", "temp-3"].includes(ipStatus)) {
-    logBuffer.push(`[KV BLOCK] IP=${ip} status=${ipStatus}`);
-    return new Response("Not Found", { status: 404 });
-  }
-  if (["permanent-block", "temp-1", "temp-2", "temp-3"].includes(fpStatus)) {
-    logBuffer.push(`[KV BLOCK] FP=${fingerprint} status=${fpStatus}`);
-    return new Response("Not Found", { status: 404 });
-  }
-
-  // ★改善点: アクティブ悪質ボットリストの自動再読込
-  const now = Date.now();
-  if (activeBadBotListCache === null || now - activeBadBotListLastRead > 600000) { // 10分ごとに再読み込み
-    const listJson = await env.BOT_BLOCKER_KV.get("ACTIVE_BAD_BOT_LIST");
-    activeBadBotListCache = new Set(listJson ? JSON.parse(listJson) : []);
-    activeBadBotListLastRead = now;
-    logBuffer.push('[CONFIG] Reloaded active bad bot list from KV.');
-  }
-  for (const patt of activeBadBotListCache) {
-    try {
-      if (new RegExp(patt, "i").test(ua)) {
-        logBuffer.push(`[ACTIVE BAD BOT BLOCK] UA matched active list rule: ${patt}`);
-        return new Response("Forbidden", { status: 403 });
-      }
-    } catch (e) {
-      logBuffer.push(`[REGEX_ERROR] Invalid pattern in ACTIVE_BAD_BOT_LIST: ${patt}`);
-    }
-  }
-
-  
+  // --- 2) ★改善: アセットは KV 読み込みより前に即返す ---
   const EXT_SKIP = /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
   if (EXT_SKIP.test(path)) {
     const importantJsPatterns = [
@@ -212,11 +213,46 @@ async function handle(request, env, ctx, logBuffer) {
     return fetch(request);
   }
 
+  // --- 3) KV ブロック状態チェック（★Cache API＋メモリで Read 削減） ---
+  const [ipStatus, fpStatus] = await Promise.all([
+    getBlockStatusCached(env, ip),
+    getBlockStatusCached(env, `FP-${fingerprint}`)
+  ]);
+  if (["permanent-block", "temp-1", "temp-2", "temp-3"].includes(ipStatus)) {
+    logBuffer.push(`[KV BLOCK] IP=${ip} status=${ipStatus}`);
+    return new Response("Not Found", { status: 404 });
+  }
+  if (["permanent-block", "temp-1", "temp-2", "temp-3"].includes(fpStatus)) {
+    logBuffer.push(`[KV BLOCK] FP=${fingerprint} status=${fpStatus}`);
+    return new Response("Not Found", { status: 404 });
+  }
+
+  // ★改善点: アクティブ悪質ボットリストの自動再読込（10分おき）
+  const now = Date.now();
+  if (activeBadBotListCache === null || now - activeBadBotListLastRead > 600000) {
+    const listJson = await env.BOT_BLOCKER_KV.get("ACTIVE_BAD_BOT_LIST");
+    activeBadBotListCache = new Set(listJson ? JSON.parse(listJson) : []);
+    activeBadBotListLastRead = now;
+    logBuffer.push('[CONFIG] Reloaded active bad bot list from KV.');
+  }
+  for (const patt of activeBadBotListCache) {
+    try {
+      if (new RegExp(patt, "i").test(ua)) {
+        logBuffer.push(`[ACTIVE BAD BOT BLOCK] UA matched active list rule: ${patt}`);
+        return new Response("Forbidden", { status: 403 });
+      }
+    } catch (e) {
+      logBuffer.push(`[REGEX_ERROR] Invalid pattern in ACTIVE_BAD_BOT_LIST: ${patt}`);
+    }
+  }
+
+  // --- 4) 静的ルール：パス探索型攻撃を即ブロック ---
   const staticBlockPatterns = ["/wp-", ".php", "phpinfo", "phpmyadmin", "/.env", "/config", "/admin/", "/dbadmin", "/_profiler", ".aws", "credentials"];
   if (staticBlockPatterns.some(patt => path.includes(patt))) {
     return logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint, logBuffer);
   }
 
+  // --- 5) UAベース判定 ---
   const safeBotPatterns = ["PetalBot"];
   const botPattern = /\b(\w+bot|bot|crawl(er)?|spider|slurp|fetch|headless|preview|agent|scanner|client|curl|wget|python|perl|java|scrape(r)?|monitor|probe|archive|validator|feed)\b/i;
   
@@ -430,21 +466,21 @@ async function handleViolationSideEffects(ip, ua, reason, ipCount, env, ctx, fin
   logBuffer.push(`[VIOLATION] IP=${ip} FP=${fingerprint} reason=${reason} IP_count=${ipCount} FP_count=${fpCount}`);
   const effectiveCount = Math.max(ipCount, fpCount);
   if (effectiveCount === 1) {
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-1", { expirationTtl: 600 }));
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-${fingerprint}`, "temp-1", { expirationTtl: 600 }));
+    ctx.waitUntil(putOnce(env, ip, "temp-1", 600));
+    ctx.waitUntil(putOnce(env, `FP-${fingerprint}`, "temp-1", 600));
   } else if (effectiveCount === 2) {
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-2", { expirationTtl: 1800 }));
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-${fingerprint}`, "temp-2", { expirationTtl: 1800 }));
+    ctx.waitUntil(putOnce(env, ip, "temp-2", 1800));
+    ctx.waitUntil(putOnce(env, `FP-${fingerprint}`, "temp-2", 1800));
   } else if (effectiveCount === 3) {
     const twentyFourHours = 24 * 3600;
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "temp-3", { expirationTtl: twentyFourHours }));
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-${fingerprint}`, "temp-3", { expirationTtl: twentyFourHours }));
+    ctx.waitUntil(putOnce(env, ip, "temp-3", twentyFourHours));
+    ctx.waitUntil(putOnce(env, `FP-${fingerprint}`, "temp-3", twentyFourHours));
   } else if (effectiveCount >= 4) {
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(ip, "permanent-block"));
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-${fingerprint}`, "permanent-block"));
+    ctx.waitUntil(putOnce(env, ip, "permanent-block", undefined));
+    ctx.waitUntil(putOnce(env, `FP-${fingerprint}`, "permanent-block", undefined));
     const record = JSON.stringify({ ip, fingerprint, userAgent: ua, reason, ipCount, fpCount, timestamp: new Date().toISOString() });
     ctx.waitUntil(env.BLOCKLIST_R2.put(`${ip}-${fingerprint.substring(0, 8)}-${Date.now()}.json`, record));
-    ctx.waitUntil(env.BOT_BLOCKER_KV.put(`FP-HIGH-COUNT-${fingerprint}`, "pending-permanent-block", { expirationTtl: 3600 * 24 }));
+    ctx.waitUntil(putOnce(env, `FP-HIGH-COUNT-${fingerprint}`, "pending-permanent-block", 3600 * 24));
   }
 }
 
