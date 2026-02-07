@@ -280,23 +280,25 @@ async function handle(request, env, ctx, logBuffer) {
     return addDebugHeader(await fetch(request));
   }
 
-  // 2) アセットは即返す（JSだけは「実行済み」をKVに短TTLでマーク）
+  // 2) アセットは即返す（"ブラウザがscriptとして読んだJS" を KV にマーク）
   const EXT_SKIP =
     /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
 
   if (EXT_SKIP.test(path)) {
-    const importantJsPatterns = [
-      /^\/\.well-known\/shopify\/monorail\//,
-      /^\/\.well-known\/shopify\/monorail\/unstable\/produce_batch/,
-      /^\/cdn\/shopifycloud\/privacy-banner\/storefront-banner\.js/,
-      /^\/cart\.js/,
-      /^\/cdn\/shop\/t\/\d+\/assets\/theme\.min\.js(\?|$)/,
-    ];
+    // ブラウザが <script> として取りに来た時に付くことが多い
+    const secFetchDest = (request.headers.get("Sec-Fetch-Dest") || "").toLowerCase();
+    const secFetchMode = (request.headers.get("Sec-Fetch-Mode") || "").toLowerCase();
+    const isScriptLoad = secFetchDest === "script" || secFetchMode === "no-cors";
 
-    if (importantJsPatterns.some((pattern) => pattern.test(path))) {
-      // 24h保持（必要なら短く）
+    // さらに「.js」を踏んだ時だけに限定
+    const isJs = /\.(js)(\?|$)/.test(path);
+
+    if (isJs && isScriptLoad) {
+      // 24h保持（必要なら短くしてOK）
       ctx.waitUntil(markJsExecuted(env, fingerprint));
+      logBuffer.push(`[FPJS] marked (script load) FP=${fingerprint} path=${path}`);
     }
+
     return addDebugHeader(await fetch(request));
   }
 
