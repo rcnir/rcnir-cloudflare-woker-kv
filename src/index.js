@@ -202,6 +202,7 @@ export default {
   },
 };
 
+
 /* -----------------------------------------------------------------
  * 6) Main request handler: handle()
  * ----------------------------------------------------------------- */
@@ -209,6 +210,14 @@ export default {
 // 6-1) handle(): すべてのリクエストを振り分けるメイン関数
 async function handle(request, env, ctx, logBuffer) {
   const url = new URL(request.url);
+
+  // ★ 疎通確認（workers.dev / rcnir.com どちらでも必ず 200 を返す）
+  if (url.pathname === "/__health") {
+    return new Response("ok", {
+      status: 200,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
 
   // Turnstile verify endpoint
   if (url.pathname === "/cf-turnstile/verify") {
@@ -510,6 +519,8 @@ async function handle(request, env, ctx, logBuffer) {
 
   return fetch(request);
 }
+
+
 
 /* -----------------------------------------------------------------
  * 7) Turnstile handlers
