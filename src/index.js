@@ -515,17 +515,25 @@ async function handle(request, env, ctx, logBuffer) {
   return addDebugHeader(await fetch(request));
 }
 
+
 /**
  * 6-2) kvRateLimitIp(): SafeBot用の簡易レート制限（KV短TTL）
  * - 永続化しない（TTL=window+少し）
+ * - cacheTtl は 30秒以上 or 省略（ここでは省略）
  */
 async function kvRateLimitIp(env, ip, limitPerWindow, windowSec) {
   const key = RL_NS + ip;
   const now = Date.now();
 
-  const raw = await env.BOT_BLOCKER_KV.get(key, { cacheTtl: 5 });
+  // ★重要：cacheTtl を 2/5 などにしない（省略でOK）
+  const raw = await env.BOT_BLOCKER_KV.get(key);
+
   let st;
-  try { st = raw ? JSON.parse(raw) : null; } catch { st = null; }
+  try {
+    st = raw ? JSON.parse(raw) : null;
+  } catch {
+    st = null;
+  }
 
   if (!st || typeof st.first !== "number" || typeof st.count !== "number") {
     st = { first: now, count: 1 };
@@ -545,6 +553,7 @@ async function kvRateLimitIp(env, ip, limitPerWindow, windowSec) {
   return allowed;
 }
 
+
 /**
  * 6-3) kvLocaleFanoutViolation(): locale fanout を KV短TTLで検知
  * - 10秒窓（LOCALE_WINDOW_MS）内で、言語が3種類以上になったら violation
@@ -556,12 +565,18 @@ async function kvLocaleFanoutViolation(env, key, path, countryLower, config) {
   if (lang === "unknown") return false;
 
   const now = Date.now();
-  const raw = await env.BOT_BLOCKER_KV.get(key, { cacheTtl: 2 });
+
+  // ★重要：cacheTtl を 2 にしない（省略でOK）
+  const raw = await env.BOT_BLOCKER_KV.get(key);
 
   let st;
-  try { st = raw ? JSON.parse(raw) : null; } catch { st = null; }
+  try {
+    st = raw ? JSON.parse(raw) : null;
+  } catch {
+    st = null;
+  }
 
-  if (!st || typeof st.windowStart !== "number" || typeof st.langs !== "object") {
+  if (!st || typeof st.windowStart !== "number" || typeof st.langs !== "object" || !st.langs) {
     st = { windowStart: now, langs: {} };
   }
 
@@ -573,7 +588,6 @@ async function kvLocaleFanoutViolation(env, key, path, countryLower, config) {
   // カウント更新（言語ごと）
   st.langs[lang] = (st.langs[lang] || 0) + 1;
 
-  // visited languages
   const visitedLanguages = Object.keys(st.langs);
 
   // 多言語国家ルール
@@ -581,7 +595,6 @@ async function kvLocaleFanoutViolation(env, key, path, countryLower, config) {
   if (multiLangConfig && Array.isArray(multiLangConfig) && multiLangConfig.length > 0) {
     const isSubset = visitedLanguages.every((l) => multiLangConfig.includes(l));
     if (isSubset) {
-      // TTL: 短く
       await env.BOT_BLOCKER_KV.put(key, JSON.stringify(st), { expirationTtl: 30 });
       return false;
     }
@@ -589,7 +602,7 @@ async function kvLocaleFanoutViolation(env, key, path, countryLower, config) {
 
   const violation = visitedLanguages.length >= LOCALE_LANG_THRESHOLD;
 
-  // violationならリセット（同じ窓で連続検知し続けない）
+  // violationならリセット
   if (violation) {
     st = { windowStart: now, langs: {} };
   }
@@ -597,6 +610,8 @@ async function kvLocaleFanoutViolation(env, key, path, countryLower, config) {
   await env.BOT_BLOCKER_KV.put(key, JSON.stringify(st), { expirationTtl: 30 });
   return violation;
 }
+
+
 
 /**
  * 6-4) parseLocaleLite(): パス先頭から言語だけ推定（軽量版）
