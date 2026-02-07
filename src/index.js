@@ -202,24 +202,41 @@ export default {
   },
 };
 
+
 /* -----------------------------------------------------------------
  * 6) Main request handler: handle()
  * ----------------------------------------------------------------- */
 
-// 6-1) handle(): すべてのリクエストを振り分けるメイン関数
+/**
+ * 6-1) handle(): すべてのリクエストを振り分けるメイン関数（DOを一切使わない版）
+ *
+ * 方針:
+ * - DO（rate-limit / check-locale / get-state 等）は完全に呼ばない
+ * - 代替は KV（短TTL）だけで実装（永続化しない=短TTLで自然消滅）
+ * - 既存の KV ブロック判定（temp/permanent）や Turnstile は維持
+ */
+
+// --- KVキー名前空間（短TTL運用） ---
+const RL_NS = "RL:";          // RL:<ip> = JSON {count, first}
+const LOCALE_NS = "LF:";      // LF:<ip|fp> = JSON { windowStart, langs:{lang:count} }
+const LOCALEFP_NS = "LFFP:";  // （FP用、区別したい場合に使用）
+
+// しきい値（必要ならここだけ変える）
+const SAFE_BOT_RATE_LIMIT_PER_MIN = 10; // 1分あたり
+const SAFE_BOT_RATE_LIMIT_WINDOW_SEC = 60;
+
+const LOCALE_WINDOW_MS = 10_000;  // 10秒
+const LOCALE_LANG_THRESHOLD = 3;  // 10秒以内に言語3種類以上で violation
+
+// 6-1) handle(): main
 async function handle(request, env, ctx, logBuffer) {
   const url = new URL(request.url);
 
-  // --- デバッグ用: Workerが通っている印をレスポンスに付ける ---
-  // 付けたくない場合は、最後の「return withDebugHeader(...)」を「return fetch(request)」に戻してOK
-  async function withDebugHeader() {
-    const res = await fetch(request);
-    const headers = new Headers(res.headers);
-    headers.set("x-bot-blocker", "1"); // ★これが「通過印」
-    return new Response(res.body, {
-      status: res.status,
-      statusText: res.statusText,
-      headers,
+  // ★疎通確認用（すでに使ってる前提）
+  if (url.pathname === "/__bb_ping") {
+    return new Response("shopify-bot-blocker: ok", {
+      status: 200,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "x-bot-blocker": "1" },
     });
   }
 
@@ -234,27 +251,30 @@ async function handle(request, env, ctx, logBuffer) {
     return new Response("Admin action completed.", { status: 200 });
   }
 
-  // --- ping: 動作確認用 ---
-  if (url.pathname === "/__bb_ping") {
-    return new Response("shopify-bot-blocker: ok", {
-      status: 200,
-      headers: { "content-type": "text/plain; charset=utf-8", "x-bot-blocker": "1" },
-    });
-  }
-
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
   const path = url.pathname.toLowerCase();
   const fingerprint = await generateFingerprint(request, logBuffer);
 
+  // ★このヘッダがあれば「Worker経由」を確認できる（あなたの確認に使える）
+  const addDebugHeader = (resp) => {
+    try {
+      const h = new Headers(resp.headers);
+      h.set("x-bot-blocker", "1");
+      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
+    } catch {
+      return resp;
+    }
+  };
+
   // 1) Cookie whitelist
   const cookieHeader = request.headers.get("Cookie") || "";
   if (cookieHeader.includes("secret-pass=Rocaniru-Admin-Bypass-XYZ789")) {
     logBuffer.push(`[WHITELIST] Access granted via secret cookie for IP=${ip}`);
-    return await withDebugHeader();
+    return addDebugHeader(await fetch(request));
   }
 
-  // 2) アセットは即返す（JSだけは「実行済み」マークをKVに）
+  // 2) アセットは即返す（JSだけは「実行済み」をKVに短TTLでマーク）
   const EXT_SKIP =
     /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
 
@@ -268,12 +288,13 @@ async function handle(request, env, ctx, logBuffer) {
     ];
 
     if (importantJsPatterns.some((pattern) => pattern.test(path))) {
+      // 24h保持（必要なら短く）
       ctx.waitUntil(markJsExecuted(env, fingerprint));
     }
-    return await withDebugHeader();
+    return addDebugHeader(await fetch(request));
   }
 
-  // 3) KV ブロック状態チェック
+  // 3) KV ブロック状態チェック（既存ロジック）
   const [ipStatus, fpStatus] = await Promise.all([
     getBlockStatusCached(env, ip),
     getBlockStatusCached(env, `FP-${fingerprint}`),
@@ -281,14 +302,14 @@ async function handle(request, env, ctx, logBuffer) {
 
   if (["permanent-block", "temp-1", "temp-2", "temp-3"].includes(ipStatus)) {
     logBuffer.push(`[KV BLOCK] IP=${ip} status=${ipStatus}`);
-    return new Response("Not Found", { status: 404 });
+    return addDebugHeader(new Response("Not Found", { status: 404 }));
   }
   if (["permanent-block", "temp-1", "temp-2", "temp-3"].includes(fpStatus)) {
     logBuffer.push(`[KV BLOCK] FP=${fingerprint} status=${fpStatus}`);
-    return new Response("Not Found", { status: 404 });
+    return addDebugHeader(new Response("Not Found", { status: 404 }));
   }
 
-  // 4) アクティブ悪質ボットリスト（10分おき再読込）
+  // 4) アクティブ悪質ボットリスト（10分おき再読込・既存ロジック）
   const now = Date.now();
   if (activeBadBotListCache === null || now - activeBadBotListLastRead > 600000) {
     const listJson = await env.BOT_BLOCKER_KV.get("ACTIVE_BAD_BOT_LIST");
@@ -301,7 +322,7 @@ async function handle(request, env, ctx, logBuffer) {
     try {
       if (new RegExp(patt, "i").test(ua)) {
         logBuffer.push(`[ACTIVE BAD BOT BLOCK] UA matched active list rule: ${patt}`);
-        return new Response("Forbidden", { status: 403 });
+        return addDebugHeader(new Response("Forbidden", { status: 403 }));
       }
     } catch {
       logBuffer.push(`[REGEX_ERROR] Invalid pattern in ACTIVE_BAD_BOT_LIST: ${patt}`);
@@ -323,36 +344,26 @@ async function handle(request, env, ctx, logBuffer) {
     "credentials",
   ];
   if (staticBlockPatterns.some((patt) => path.includes(patt))) {
-    return logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint, logBuffer);
+    return addDebugHeader(logAndBlock(ip, ua, "path-scan", env, ctx, fingerprint, logBuffer));
   }
 
-  // 6) UAベース判定
+  // 6) UAベース判定（既存ロジック）
   const safeBotPatterns = ["PetalBot"];
   const botPattern =
     /\b(\w+bot|bot|crawl(er)?|spider|slurp|fetch|headless|preview|agent|scanner|client|curl|wget|python|perl|java|scrape(r)?|monitor|probe|archive|validator|feed)\b/i;
 
   let refinedLabel = "[H]";
 
-  // DOスタブ（壊れても落ちない） ※現状はsafe-botのrate-limitとlocale判定用
-  const ipTrackerStub = env.IP_STATE_TRACKER.get(env.IP_STATE_TRACKER.idFromName(ip));
-  const fpTrackerStub = env.FINGERPRINT_TRACKER.get(env.FINGERPRINT_TRACKER.idFromName(fingerprint));
-
+  // botっぽいUA
   if (botPattern.test(ua)) {
     refinedLabel = "[B]";
 
+    // SafeBot は KVで軽いレート制限（DOは使わない）
     if (safeBotPatterns.some((safeBot) => ua.toLowerCase().includes(safeBot.toLowerCase()))) {
-      const res = await safeFetchDO(
-        ipTrackerStub,
-        new Request("https://internal/rate-limit", { headers: { "CF-Connecting-IP": ip } }),
-        logBuffer,
-        "rate-limit"
-      );
-      if (res && res.ok) {
-        const { allowed } = await res.json();
-        if (!allowed) {
-          logBuffer.push(`[RATE LIMIT] SafeBot blocked. IP=${ip}`);
-          return new Response("Too Many Requests", { status: 429 });
-        }
+      const allowed = await kvRateLimitIp(env, ip, SAFE_BOT_RATE_LIMIT_PER_MIN, SAFE_BOT_RATE_LIMIT_WINDOW_SEC);
+      if (!allowed) {
+        logBuffer.push(`[RATE LIMIT] SafeBot blocked. IP=${ip}`);
+        return addDebugHeader(new Response("Too Many Requests", { status: 429 }));
       }
       refinedLabel = "[SAFE_BOT]";
     }
@@ -368,7 +379,7 @@ async function handle(request, env, ctx, logBuffer) {
 
   // TH / SAFE_BOT は通す
   if (refinedLabel === "[TH]" || refinedLabel === "[SAFE_BOT]") {
-    return await withDebugHeader();
+    return addDebugHeader(await fetch(request));
   }
 
   // 8) B判定：学習済み/辞書
@@ -383,7 +394,7 @@ async function handle(request, env, ctx, logBuffer) {
         if (new RegExp(patt, "i").test(ua)) {
           const reason = `unwanted-bot(learned):${patt}`;
           ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
-          return new Response("Not Found", { status: 404 });
+          return addDebugHeader(new Response("Not Found", { status: 404 }));
         }
       } catch {
         logBuffer.push(`[REGEX_ERROR] Invalid pattern in LEARNED_BAD_BOTS: ${patt}`);
@@ -400,18 +411,16 @@ async function handle(request, env, ctx, logBuffer) {
         if (new RegExp(patt, "i").test(ua)) {
           const reason = `unwanted-bot(new):${patt}`;
 
+          // アクティブリストへ追加（既存の思想）
           if (activeBadBotListCache) {
             activeBadBotListCache.add(patt);
             ctx.waitUntil(
-              env.BOT_BLOCKER_KV.put(
-                "ACTIVE_BAD_BOT_LIST",
-                JSON.stringify(Array.from(activeBadBotListCache))
-              )
+              env.BOT_BLOCKER_KV.put("ACTIVE_BAD_BOT_LIST", JSON.stringify(Array.from(activeBadBotListCache)))
             );
           }
 
           ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
-          return new Response("Not Found", { status: 404 });
+          return addDebugHeader(new Response("Not Found", { status: 404 }));
         }
       } catch {
         logBuffer.push(`[REGEX_ERROR] Invalid pattern in SYSTEM_BAD_BOT_LIST: ${patt}`);
@@ -419,25 +428,25 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
 
-  // 9) SH判定：Turnstile条件（locale fanout は DO）
+  // 9) SH判定：Turnstile条件（locale fanout は KV短TTLで見る）
   if (refinedLabel === "[SH]") {
     const accept = request.headers.get("Accept") || "";
     const isHtmlRequest = accept.includes("text/html") || accept.includes("*/*") || accept === "";
     if (!isHtmlRequest) {
       logBuffer.push("[CHALLENGE SKIP] Non-HTML request");
-      return await withDebugHeader();
+      return addDebugHeader(await fetch(request));
     }
 
     const cookies = parseCookieSafe(request);
     const passToken = cookies["ts_pass"];
     if (passToken && (await checkKvPassToken(env, passToken, fingerprint))) {
       logBuffer.push("[TURNSTILE BYPASS] KV pass token valid. Allowing request.");
-      return await withDebugHeader();
+      return addDebugHeader(await fetch(request));
     }
 
     if (request.method !== "GET") {
       logBuffer.push(`[CHALLENGE SKIP] non-GET: ${request.method}`);
-      return await withDebugHeader();
+      return addDebugHeader(await fetch(request));
     }
 
     const kvConfig = (await env.BOT_BLOCKER_KV.get("WORKER_CONFIG", { type: "json" })) ?? {};
@@ -451,6 +460,7 @@ async function handle(request, env, ctx, logBuffer) {
     let score = 0;
     const signals = [];
 
+    // suspicious ASN
     const asn = request.cf?.asn;
     if (asn) {
       if (asnBlocklistCache === null) {
@@ -463,6 +473,7 @@ async function handle(request, env, ctx, logBuffer) {
       }
     }
 
+    // missing headers
     const secChUa = request.headers.get("Sec-Ch-Ua");
     const acceptLanguage = request.headers.get("Accept-Language");
     if (!secChUa && !acceptLanguage) {
@@ -473,38 +484,12 @@ async function handle(request, env, ctx, logBuffer) {
       signals.push("missing_headers_partial");
     }
 
-    const [ipLocaleRes, fpLocaleRes] = await Promise.all([
-      safeFetchDO(
-        ipTrackerStub,
-        new Request("https://internal/check-locale", {
-          method: "POST",
-          headers: { "CF-Connecting-IP": ip, "Content-Type": "application/json" },
-          body: JSON.stringify({ path, config, country: request.cf?.country }),
-        }),
-        logBuffer,
-        "check-locale-ip"
-      ),
-      safeFetchDO(
-        fpTrackerStub,
-        new Request("https://internal/check-locale-fp", {
-          method: "POST",
-          headers: { "X-Fingerprint-ID": fingerprint, "Content-Type": "application/json" },
-          body: JSON.stringify({ path, config, country: request.cf?.country }),
-        }),
-        logBuffer,
-        "check-locale-fp"
-      ),
-    ]);
+    // locale fanout (KV短TTL)
+    const country = (request.cf?.country || "").toLowerCase();
+    const ipViolation = await kvLocaleFanoutViolation(env, `${LOCALE_NS}${ip}`, path, country, config);
+    const fpViolation = await kvLocaleFanoutViolation(env, `${LOCALEFP_NS}${fingerprint}`, path, country, config);
 
-    let localeViolation = false;
-    try {
-      if (ipLocaleRes && ipLocaleRes.ok) localeViolation = localeViolation || !!(await ipLocaleRes.json()).violation;
-    } catch {}
-    try {
-      if (fpLocaleRes && fpLocaleRes.ok) localeViolation = localeViolation || !!(await fpLocaleRes.json()).violation;
-    } catch {}
-
-    if (localeViolation) {
+    if (ipViolation || fpViolation) {
       score += config?.scores?.localeFanout ?? 20;
       signals.push("locale_fanout");
     }
@@ -513,7 +498,7 @@ async function handle(request, env, ctx, logBuffer) {
 
     if (score >= (config?.thresholds?.challenge ?? 40)) {
       logBuffer.push(`[TURNSTILE CHALLENGE] score=${score} IP=${ip}`);
-      return presentTurnstileChallenge(request, env, fingerprint);
+      return addDebugHeader(presentTurnstileChallenge(request, env, fingerprint));
     }
   }
 
@@ -523,12 +508,117 @@ async function handle(request, env, ctx, logBuffer) {
     if (!isVerified) {
       const reason = "amazon-impersonation";
       ctx.waitUntil(handleViolationSideEffects(ip, ua, reason, 1, env, ctx, fingerprint, 1, logBuffer));
-      return new Response("Not Found", { status: 404 });
+      return addDebugHeader(new Response("Not Found", { status: 404 }));
     }
   }
 
-  // デフォルト：Shopifyへ（ヘッダーに印を付けて返す）
-  return await withDebugHeader();
+  return addDebugHeader(await fetch(request));
+}
+
+/**
+ * 6-2) kvRateLimitIp(): SafeBot用の簡易レート制限（KV短TTL）
+ * - 永続化しない（TTL=window+少し）
+ */
+async function kvRateLimitIp(env, ip, limitPerWindow, windowSec) {
+  const key = RL_NS + ip;
+  const now = Date.now();
+
+  const raw = await env.BOT_BLOCKER_KV.get(key, { cacheTtl: 5 });
+  let st;
+  try { st = raw ? JSON.parse(raw) : null; } catch { st = null; }
+
+  if (!st || typeof st.first !== "number" || typeof st.count !== "number") {
+    st = { first: now, count: 1 };
+  } else {
+    if (now - st.first > windowSec * 1000) {
+      st = { first: now, count: 1 };
+    } else {
+      st.count += 1;
+    }
+  }
+
+  const allowed = st.count <= limitPerWindow;
+
+  // TTLは窓+余裕（永続化しない）
+  await env.BOT_BLOCKER_KV.put(key, JSON.stringify(st), { expirationTtl: windowSec + 30 });
+
+  return allowed;
+}
+
+/**
+ * 6-3) kvLocaleFanoutViolation(): locale fanout を KV短TTLで検知
+ * - 10秒窓（LOCALE_WINDOW_MS）内で、言語が3種類以上になったら violation
+ * - 多言語国家ルール（config.multiLanguageCountries）も尊重
+ * - 永続化しない（TTLは数十秒）
+ */
+async function kvLocaleFanoutViolation(env, key, path, countryLower, config) {
+  const { lang } = parseLocaleLite(path);
+  if (lang === "unknown") return false;
+
+  const now = Date.now();
+  const raw = await env.BOT_BLOCKER_KV.get(key, { cacheTtl: 2 });
+
+  let st;
+  try { st = raw ? JSON.parse(raw) : null; } catch { st = null; }
+
+  if (!st || typeof st.windowStart !== "number" || typeof st.langs !== "object") {
+    st = { windowStart: now, langs: {} };
+  }
+
+  // 窓の更新
+  if (now - st.windowStart > LOCALE_WINDOW_MS) {
+    st = { windowStart: now, langs: {} };
+  }
+
+  // カウント更新（言語ごと）
+  st.langs[lang] = (st.langs[lang] || 0) + 1;
+
+  // visited languages
+  const visitedLanguages = Object.keys(st.langs);
+
+  // 多言語国家ルール
+  const multiLangConfig = config?.multiLanguageCountries?.[countryLower];
+  if (multiLangConfig && Array.isArray(multiLangConfig) && multiLangConfig.length > 0) {
+    const isSubset = visitedLanguages.every((l) => multiLangConfig.includes(l));
+    if (isSubset) {
+      // TTL: 短く
+      await env.BOT_BLOCKER_KV.put(key, JSON.stringify(st), { expirationTtl: 30 });
+      return false;
+    }
+  }
+
+  const violation = visitedLanguages.length >= LOCALE_LANG_THRESHOLD;
+
+  // violationならリセット（同じ窓で連続検知し続けない）
+  if (violation) {
+    st = { windowStart: now, langs: {} };
+  }
+
+  await env.BOT_BLOCKER_KV.put(key, JSON.stringify(st), { expirationTtl: 30 });
+  return violation;
+}
+
+/**
+ * 6-4) parseLocaleLite(): パス先頭から言語だけ推定（軽量版）
+ * - /, /ja は ja
+ * - /en は en
+ * - /fr-ch のような場合は fr を返す
+ */
+function parseLocaleLite(path) {
+  const trimmed = String(path || "/").replace(/^\/+/, "").toLowerCase();
+  const seg = trimmed.split("/")[0];
+
+  if (seg === "" || seg === "ja") return { lang: "ja" };
+  if (seg === "en") return { lang: "en" };
+
+  const m = seg.match(/^([a-z]{2})-([a-z]{2})$/i);
+  if (m) return { lang: m[1] };
+
+  // /fr /de のような2文字だけも許容
+  const m2 = seg.match(/^([a-z]{2})$/i);
+  if (m2) return { lang: m2[1] };
+
+  return { lang: "unknown" };
 }
 
 
