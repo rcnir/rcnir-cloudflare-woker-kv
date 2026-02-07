@@ -1,74 +1,90 @@
 /*
  * =================================================================
+ *  shopify-bot-blocker / src/index.js
+ * =================================================================
+ *
+ * 目的:
+ *  - Shopifyストア( rc nir.com )へのボット/クローラ攻撃・濫用アクセスを抑止
+ *  - 永続化しない方針: 主要な判定は KV の短TTLで自然消滅（DOは使わない設計）
+ *
+ * 疎通確認エンドポイント（残す理由）:
+ *  - /__bb_ping は「Workerがルートに適用されているか」を即判定するために残す
+ *  - 返すレスポンスは text/plain + x-bot-blocker: 1
+ *  - SEO対策: X-Robots-Tag: noindex, nofollow, noarchive を付与してインデックスさせない
+ *
+ *    例: https://rcnir.com/__bb_ping
+ *      -> "shopify-bot-blocker: ok"
+ *      -> Response Headers に x-bot-blocker: 1 があれば Worker 経由
+ *
+ * -----------------------------------------------------------------
  * 目次 (Table of Contents)
- * =================================================================
- * 1. エクスポートとメインハンドラ (Exports & Main Handlers)
- * 2. メインロジック (Main Logic)
- * 3. コアヘルパー関数 (Core Helper Functions)
- * 4. ユーティリティ関数 (Utility Functions)
- * =================================================================
- *
- * =================================================================
- * 便利なターミナルコマンド (Useful Terminal Commands)
- * =================================================================
- *
- * --- ログ監視 (Log Monitoring) ---
- *
- * ■ 全てのログを表示
- * npx wrangler tail shopify-bot-blocker
- *
- * ■ TH判定 (信頼された人間) のみ表示
- * npx wrangler tail shopify-bot-blocker | grep -F "[TH]"
- *
- * ■ SH判定 (不審な人間) のみ表示
- * npx wrangler tail shopify-bot-blocker | grep -F "[SH]"
- *
- * ■ B判定 (ボット) のみ表示
- * npx wrangler tail shopify-bot-blocker | grep -F "[B]"
- *
- * ■ VIOLATION (違反検知) のみ表示
- * npx wrangler tail shopify-bot-blocker | grep "\[VIOLATION\]"
- *
- * --- KVストア管理 (KV Store Management) ---
- *
- * ■ ブロック中の全IP/FPを一覧表示
- * npx wrangler kv key list --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb"
- *
- * ■ 特定のIP/FPのブロック状態を確認 (例: "192.0.2.1")
- * npx wrangler kv key get --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb" "ここにIPアドレスかFPキーを入力"
- *
- * --- R2バケット管理 (R2 Bucket Management) ---
- *
- * ■ 永続ブロックされたボットの全ログファイル一覧を表示
- * npx wrangler r2 object list rocaniiru-log
- *
- * ■ 特定のログファイルの中身を表示 (例: "192.0.2.1-a1b2c3d4-...")
- * npx wrangler r2 object get rocaniiru-log "ここにファイル名を入力"
- *
- * --- デプロイ (Deployment) ---
- *
- * ■ WorkerをCloudflareにデプロイ
- * npx wrangler deploy
- *
- * =================================================================
- */
-// src/index.js
-/*
- * =================================================================
- * 目次 (Table of Contents)
- * =================================================================
+ * -----------------------------------------------------------------
  * 1. imports / exports / module-scope caches
  * 2. KV cache helpers (read/write debounce)
- * 3. Durable Object safe wrapper
+ * 3. Durable Object safe wrapper (※現状: 互換のため残存。メインhandleでは使用しない想定)
  * 4. FP "JS executed" tracking (KV-based)
  * 5. Worker entrypoints (fetch / scheduled)
- * 6. Main request handler: handle()
+ * 6. Main request handler: handle()   ★メイン（DOを一切使わない版）
  * 7. Turnstile handlers
  * 8. Violation handling (KV/R2)
  * 9. Bot verification (CIDR)
  * 10. Utilities (admin, cookies, token, cidr)
+ *
+ * -----------------------------------------------------------------
+ * 便利なターミナルコマンド (Useful Terminal Commands)
+ * -----------------------------------------------------------------
+ *
+ * 【0】前提
+ *  - wranglerログイン（必要なときだけ）
+ *    npx wrangler login
+ *
+ * 【1】ログ監視（tail）
+ *  - 全ログ（まずこれ）
+ *    npx wrangler tail shopify-bot-blocker
+ *
+ *  - 自分のアクセスだけ見たい（トラブル時に便利）
+ *    npx wrangler tail shopify-bot-blocker --ip self
+ *
+ *  - 失敗だけ（例外/エラーだけ拾う）
+ *    npx wrangler tail shopify-bot-blocker --status error
+ *
+ *  - ラベル別フィルタ（Mac/Linux）
+ *    npx wrangler tail shopify-bot-blocker | grep -F "[TH]"
+ *    npx wrangler tail shopify-bot-blocker | grep -F "[SH]"
+ *    npx wrangler tail shopify-bot-blocker | grep -F "[B]"
+ *    npx wrangler tail shopify-bot-blocker | grep -F "[VIOLATION]"
+ *    npx wrangler tail shopify-bot-blocker | grep -F "[DO_FAIL]"
+ *
+ * 【2】疎通確認（ブラウザ / curl）
+ *  - Workerが効いてるか（最短）
+ *    curl -i https://rcnir.com/__bb_ping
+ *
+ *  - ヘッダに x-bot-blocker: 1 が付けば Worker 経由
+ *
+ * 【3】KVストア（ブロック状態など）
+ *  - キー一覧
+ *    npx wrangler kv key list --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb"
+ *
+ *  - IPのブロック状態（例: 203.0.113.10）
+ *    npx wrangler kv key get --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb" "203.0.113.10"
+ *
+ *  - FPのブロック状態（例: FP-abcdef12）
+ *    npx wrangler kv key get --namespace-id="7da99382fc3945bd87bc65f55c9ea1fb" "FP-abcdef12"
+ *
+ * 【4】R2（永続ログ / permanent-block記録）
+ *  - オブジェクト一覧
+ *    npx wrangler r2 object list rocaniiru-log
+ *
+ *  - 取得して中身を見る（例: filename.json）
+ *    npx wrangler r2 object get rocaniiru-log "filename.json" -
+ *
+ * 【5】デプロイ
+ *  - デプロイ（GitHub Actions運用でも、ローカル手動でも）
+ *    npx wrangler deploy
+ *
  * =================================================================
  */
+
 
 import { IPStateTrackerV2 } from "./do/IPStateTracker.js";
 import { FingerprintTrackerV2, generateFingerprint } from "./do/FingerprintTracker.js";
