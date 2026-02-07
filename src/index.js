@@ -211,11 +211,21 @@ export default {
 async function handle(request, env, ctx, logBuffer) {
   const url = new URL(request.url);
 
-  // ★ 疎通確認（workers.dev / rcnir.com どちらでも必ず 200 を返す）
-  if (url.pathname === "/__health") {
-    return new Response("ok", {
+  // ==========================================================
+  // ★(追加) workers.dev 直叩きの生存確認用
+  // - workers.dev は「ルート設定」で rcnir.com に紐づけるのとは別枠
+  // - 本コードは最終的に fetch(request) で「オリジンへ転送」する設計なので
+  //   workers.dev をブラウザで開くと "There is nothing here yet" になりがち
+  // - ここで 200 を返せば「Workerが動いてる/デプロイできてる」を即確認できる
+  // ==========================================================
+  if (url.hostname.endsWith(".workers.dev")) {
+    // 管理・検証用の最小レスポンス
+    return new Response("shopify-bot-blocker alive", {
       status: 200,
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
     });
   }
 
@@ -519,8 +529,6 @@ async function handle(request, env, ctx, logBuffer) {
 
   return fetch(request);
 }
-
-
 
 /* -----------------------------------------------------------------
  * 7) Turnstile handlers
