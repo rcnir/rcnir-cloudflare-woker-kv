@@ -202,7 +202,6 @@ export default {
   },
 };
 
-
 /* -----------------------------------------------------------------
  * 6) Main request handler: handle()
  * ----------------------------------------------------------------- */
@@ -211,34 +210,16 @@ export default {
 async function handle(request, env, ctx, logBuffer) {
   const url = new URL(request.url);
 
-    // ★ 疎通確認用：これが返れば「このリクエストはWorkerを通っている」
-  if (url.pathname === "/__bb_ping") {
-    return new Response("shopify-bot-blocker: ok", {
-      status: 200,
-      headers: {
-        "content-type": "text/plain; charset=utf-8",
-        "cache-control": "no-store",
-        "x-bot-blocker": "1",
-      },
-    });
-  }
-
-  
-  // ==========================================================
-  // ★(追加) workers.dev 直叩きの生存確認用
-  // - workers.dev は「ルート設定」で rcnir.com に紐づけるのとは別枠
-  // - 本コードは最終的に fetch(request) で「オリジンへ転送」する設計なので
-  //   workers.dev をブラウザで開くと "There is nothing here yet" になりがち
-  // - ここで 200 を返せば「Workerが動いてる/デプロイできてる」を即確認できる
-  // ==========================================================
-  if (url.hostname.endsWith(".workers.dev")) {
-    // 管理・検証用の最小レスポンス
-    return new Response("shopify-bot-blocker alive", {
-      status: 200,
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-store",
-      },
+  // --- デバッグ用: Workerが通っている印をレスポンスに付ける ---
+  // 付けたくない場合は、最後の「return withDebugHeader(...)」を「return fetch(request)」に戻してOK
+  async function withDebugHeader() {
+    const res = await fetch(request);
+    const headers = new Headers(res.headers);
+    headers.set("x-bot-blocker", "1"); // ★これが「通過印」
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers,
     });
   }
 
@@ -253,6 +234,14 @@ async function handle(request, env, ctx, logBuffer) {
     return new Response("Admin action completed.", { status: 200 });
   }
 
+  // --- ping: 動作確認用 ---
+  if (url.pathname === "/__bb_ping") {
+    return new Response("shopify-bot-blocker: ok", {
+      status: 200,
+      headers: { "content-type": "text/plain; charset=utf-8", "x-bot-blocker": "1" },
+    });
+  }
+
   const ua = request.headers.get("User-Agent") || "UA_NOT_FOUND";
   const ip = request.headers.get("CF-Connecting-IP") || "IP_NOT_FOUND";
   const path = url.pathname.toLowerCase();
@@ -262,12 +251,13 @@ async function handle(request, env, ctx, logBuffer) {
   const cookieHeader = request.headers.get("Cookie") || "";
   if (cookieHeader.includes("secret-pass=Rocaniru-Admin-Bypass-XYZ789")) {
     logBuffer.push(`[WHITELIST] Access granted via secret cookie for IP=${ip}`);
-    return fetch(request);
+    return await withDebugHeader();
   }
 
   // 2) アセットは即返す（JSだけは「実行済み」マークをKVに）
   const EXT_SKIP =
     /\.(jpg|jpeg|png|gif|svg|webp|js|css|woff2?|ttf|ico|map|txt|eot|otf|json|xml|avif)(\?|$)/;
+
   if (EXT_SKIP.test(path)) {
     const importantJsPatterns = [
       /^\/\.well-known\/shopify\/monorail\//,
@@ -278,10 +268,9 @@ async function handle(request, env, ctx, logBuffer) {
     ];
 
     if (importantJsPatterns.some((pattern) => pattern.test(path))) {
-      // DOではなくKVで「JS実行済み」を記録
       ctx.waitUntil(markJsExecuted(env, fingerprint));
     }
-    return fetch(request);
+    return await withDebugHeader();
   }
 
   // 3) KV ブロック状態チェック
@@ -344,7 +333,7 @@ async function handle(request, env, ctx, logBuffer) {
 
   let refinedLabel = "[H]";
 
-  // Safe-bot rate limit のために DO スタブは作る（ただしDOが壊れても落ちない）
+  // DOスタブ（壊れても落ちない） ※現状はsafe-botのrate-limitとlocale判定用
   const ipTrackerStub = env.IP_STATE_TRACKER.get(env.IP_STATE_TRACKER.idFromName(ip));
   const fpTrackerStub = env.FINGERPRINT_TRACKER.get(env.FINGERPRINT_TRACKER.idFromName(fingerprint));
 
@@ -352,7 +341,6 @@ async function handle(request, env, ctx, logBuffer) {
     refinedLabel = "[B]";
 
     if (safeBotPatterns.some((safeBot) => ua.toLowerCase().includes(safeBot.toLowerCase()))) {
-      // SafeBotだけは軽くレート制限（DOが死んでたら許可）
       const res = await safeFetchDO(
         ipTrackerStub,
         new Request("https://internal/rate-limit", { headers: { "CF-Connecting-IP": ip } }),
@@ -380,7 +368,7 @@ async function handle(request, env, ctx, logBuffer) {
 
   // TH / SAFE_BOT は通す
   if (refinedLabel === "[TH]" || refinedLabel === "[SAFE_BOT]") {
-    return fetch(request);
+    return await withDebugHeader();
   }
 
   // 8) B判定：学習済み/辞書
@@ -431,25 +419,25 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
 
-  // 9) SH判定：Turnstile条件（locale fanout は DOのメモリで見る）
+  // 9) SH判定：Turnstile条件（locale fanout は DO）
   if (refinedLabel === "[SH]") {
     const accept = request.headers.get("Accept") || "";
     const isHtmlRequest = accept.includes("text/html") || accept.includes("*/*") || accept === "";
     if (!isHtmlRequest) {
       logBuffer.push("[CHALLENGE SKIP] Non-HTML request");
-      return fetch(request);
+      return await withDebugHeader();
     }
 
     const cookies = parseCookieSafe(request);
     const passToken = cookies["ts_pass"];
     if (passToken && (await checkKvPassToken(env, passToken, fingerprint))) {
       logBuffer.push("[TURNSTILE BYPASS] KV pass token valid. Allowing request.");
-      return fetch(request);
+      return await withDebugHeader();
     }
 
     if (request.method !== "GET") {
       logBuffer.push(`[CHALLENGE SKIP] non-GET: ${request.method}`);
-      return fetch(request);
+      return await withDebugHeader();
     }
 
     const kvConfig = (await env.BOT_BLOCKER_KV.get("WORKER_CONFIG", { type: "json" })) ?? {};
@@ -485,7 +473,6 @@ async function handle(request, env, ctx, logBuffer) {
       signals.push("missing_headers_partial");
     }
 
-    // locale fanout（DOが死んでたら違反なし扱い）
     const [ipLocaleRes, fpLocaleRes] = await Promise.all([
       safeFetchDO(
         ipTrackerStub,
@@ -540,8 +527,11 @@ async function handle(request, env, ctx, logBuffer) {
     }
   }
 
-  return fetch(request);
+  // デフォルト：Shopifyへ（ヘッダーに印を付けて返す）
+  return await withDebugHeader();
 }
+
+
 
 /* -----------------------------------------------------------------
  * 7) Turnstile handlers
