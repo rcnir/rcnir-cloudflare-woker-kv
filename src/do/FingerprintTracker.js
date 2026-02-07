@@ -1,21 +1,24 @@
 // src/do/FingerprintTracker.js
 
-// スコア減衰の設定 (点/分)
+/**
+ * FingerprintTrackerV2 (Durable Object)
+ * - 無料枠で破綻しないよう、Durable Objects の永続ストレージ(state.storage)を一切使わない版。
+ * - locale fanout 判定はメモリのみで保持。
+ * - "JS実行済み" は DO ではなくメインWorker側で KV に記録する（index.js側）。
+ */
+
 const SCORE_DECAY_PER_MINUTE = 1;
 const DECAY_INTERVAL_MS = 60 * 1000;
 
-// --- 指紋生成に使う軽量ハッシュ: CRC32（簡易実装でOK用途） ---
+// --- 指紋生成に使う軽量ハッシュ: CRC32（簡易実装） ---
 function crc32(str) {
   let crc = -1;
   for (let i = 0; i < str.length; i++) {
     let char = str.charCodeAt(i);
     crc = (crc >>> 0) ^ char;
     for (let j = 0; j < 8; j++) {
-      if ((crc & 1) === 1) {
-        crc = (crc >>> 1) ^ 0xEDB88320;
-      } else {
-        crc = (crc >>> 1);
-      }
+      if ((crc & 1) === 1) crc = (crc >>> 1) ^ 0xEDB88320;
+      else crc = (crc >>> 1);
     }
   }
   return (crc ^ -1) >>> 0;
@@ -43,26 +46,20 @@ export async function generateFingerprint(request, logBuffer) {
     logBuffer.push(`--- FP_FULL_DEBUG START ---`);
     logBuffer.push(`[FP_FULL_DEBUG] URL: ${request.url}`);
     logBuffer.push(`[FP_FULL_DEBUG] IP: ${headers.get("CF-Connecting-IP") || "N/A"}`);
-    logBuffer.push(
-      `[FP_FULL_DEBUG] Constructed String: "${fingerprintString}" -> Generated FP (CRC32): "${fingerprint}"`
-    );
+    logBuffer.push(`[FP_FULL_DEBUG] Constructed String: "${fingerprintString}" -> Generated FP (CRC32): "${fingerprint}"`);
     logBuffer.push(`--- FP_FULL_DEBUG END ---`);
   }
 
   return fingerprint;
 }
 
-// --- Durable Object: FingerprintTrackerV2 ---
 export class FingerprintTrackerV2 {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.memState = null;
 
-    this.state.blockConcurrencyWhile(async () => {
-      this.memState =
-        (await this.state.storage.get("state")) || this._getInitialState();
-    });
+    // 永続化しない（メモリのみ）
+    this.memState = this._getInitialState();
   }
 
   _getInitialState() {
@@ -70,44 +67,30 @@ export class FingerprintTrackerV2 {
       score: 0,
       lastUpdated: Date.now(),
       hasStrike: false,
-      jsExecuted: false,
-      lgRegions: {},
+
+      // locale fanout tracking (in-memory only)
+      lgRegions: {}, // key: "lang-country" -> timestamp(ms)
     };
   }
 
   async fetch(request) {
-    if (!this.memState) {
-      this.memState =
-        (await this.state.storage.get("state")) || this._getInitialState();
-    }
     const url = new URL(request.url);
 
     switch (url.pathname) {
       case "/update-score":
         return this.handleUpdateScore(request);
-      case "/record-js-execution":
-        return this.recordJsExecution();
+
       case "/check-locale-fp":
         return this.handleLocaleCheck(request);
-      case "/get-state": // デバッグ用途
+
+      case "/get-state":
         return new Response(JSON.stringify(this.memState), {
           headers: { "Content-Type": "application/json" },
         });
+
       default:
         return new Response("Not found", { status: 404 });
     }
-  }
-
-  async recordJsExecution() {
-    if (!this.memState.jsExecuted) {
-      this.memState.jsExecuted = true;
-      await this.state.storage.put("state", this.memState);
-    }
-    // state.id は DO インスタンスID（nameFromId 由来の文字列）を含みます
-    console.log(
-      `[DO_JS_RECORD] FP_DO=${this.state.id.toString()} recorded JS execution.`
-    );
-    return new Response("JS execution recorded.", { status: 200 });
   }
 
   async handleUpdateScore(request) {
@@ -120,15 +103,10 @@ export class FingerprintTrackerV2 {
 
     const { scoreToAdd, config } = body || {};
     const now = Date.now();
-    const minutesPassed = Math.floor(
-      (now - this.memState.lastUpdated) / DECAY_INTERVAL_MS
-    );
+    const minutesPassed = Math.floor((now - this.memState.lastUpdated) / DECAY_INTERVAL_MS);
 
     if (minutesPassed > 0) {
-      this.memState.score = Math.max(
-        0,
-        this.memState.score - minutesPassed * SCORE_DECAY_PER_MINUTE
-      );
+      this.memState.score = Math.max(0, this.memState.score - minutesPassed * SCORE_DECAY_PER_MINUTE);
     }
     this.memState.score += Number(scoreToAdd) || 0;
     this.memState.lastUpdated = now;
@@ -137,27 +115,21 @@ export class FingerprintTrackerV2 {
     const blockThreshold = config?.thresholds?.block ?? 70;
     const challengeThreshold = config?.thresholds?.challenge ?? 40;
 
-    if (this.memState.score >= blockThreshold) {
-      action = "BLOCK";
-    } else if (this.memState.score >= challengeThreshold) {
-      action = "CHALLENGE";
-    }
+    if (this.memState.score >= blockThreshold) action = "BLOCK";
+    else if (this.memState.score >= challengeThreshold) action = "CHALLENGE";
 
     if (action === "BLOCK") {
-      if (this.memState.hasStrike) {
-        action = "PERMANENT_BLOCK";
-      } else {
+      if (this.memState.hasStrike) action = "PERMANENT_BLOCK";
+      else {
         this.memState.hasStrike = true;
         action = "TEMP_BLOCK";
       }
     }
 
-    await this.state.storage.put("state", this.memState);
-
-    return new Response(
-      JSON.stringify({ newScore: this.memState.score, action }),
-      { headers: { "Content-Type": "application/json" } }
-    );
+    // ★永続化しない：state.storage.put しない
+    return new Response(JSON.stringify({ newScore: this.memState.score, action }), {
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   async handleLocaleCheck(request) {
@@ -180,11 +152,13 @@ export class FingerprintTrackerV2 {
     const now = Date.now();
     const windowMs = 10 * 1000;
 
+    // 掃除（期限切れを削除）
     this.memState.lgRegions = this.memState.lgRegions || {};
     for (const [key, ts] of Object.entries(this.memState.lgRegions)) {
       if (now - ts > windowMs) delete this.memState.lgRegions[key];
     }
 
+    // 今回の訪問（メモリのみ）
     const currentKey = `${lang}-${pathCountry}`;
     this.memState.lgRegions[currentKey] = now;
 
@@ -195,29 +169,24 @@ export class FingerprintTrackerV2 {
     // 多言語国家の特別ルール
     const multiLangConfig = config?.multiLanguageCountries?.[country];
     if (multiLangConfig) {
-      const isSubset = [...visitedLanguages].every((l) =>
-        multiLangConfig.includes(l)
-      );
+      const isSubset = [...visitedLanguages].every((l) => multiLangConfig.includes(l));
       if (isSubset) {
-        await this.state.storage.put("state", this.memState);
-        return new Response(
-          JSON.stringify({ violation: false, multiLangRule: true }),
-          { headers: { "Content-Type": "application/json" } }
-        );
+        return new Response(JSON.stringify({ violation: false, multiLangRule: true }), {
+          headers: { "Content-Type": "application/json" },
+        });
       }
     }
 
+    // 違反判定（元ロジック踏襲：3言語以上）
     const violation = visitedLanguages.size >= 3;
     if (violation) this.memState.lgRegions = {};
 
-    await this.state.storage.put("state", this.memState);
     return new Response(JSON.stringify({ violation }), {
       headers: { "Content-Type": "application/json" },
     });
   }
 }
 
-// --- パス先頭から言語/国コードを推定 ---
 function parseLocale(path) {
   const trimmedPath = String(path || "/").replace(/^\/+/, "").toLowerCase();
   const seg = trimmedPath.split("/")[0];
