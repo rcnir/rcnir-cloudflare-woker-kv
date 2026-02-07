@@ -1,130 +1,127 @@
-// スコア減衰の設定 (点/分)
-const SCORE_DECAY_PER_MINUTE = 1;
-const DECAY_INTERVAL_MS = 60 * 1000;
+// src/do/IPStateTracker.js
+
+/**
+ * IPStateTrackerV2 (Durable Object)
+ * - 無料枠で破綻しないよう、Durable Objects の永続ストレージ(state.storage)を一切使わない版。
+ * - rateLimit / locale fanout は「短時間窓」なのでメモリのみで十分。
+ * - DO プロセスが落ちれば状態は消えるが、無料運用の安定性を優先。
+ */
 
 export class IPStateTrackerV2 {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.memState = null;
 
-    this.state.blockConcurrencyWhile(async () => {
-      this.memState = await this.state.storage.get("state") || this._getInitialState();
-    });
+    // 永続化しない（メモリのみ）
+    this.memState = this._getInitialState();
   }
 
   _getInitialState() {
     return {
-      score: 0,
-      lastUpdated: Date.now(),
-      hasStrike: false,
+      // rate limit (in-memory only)
       rateLimit: { count: 0, firstRequest: 0 },
-      lgRegions: {}
+
+      // locale fanout tracking (in-memory only)
+      lgRegions: {}, // key: "lang-country" -> timestamp(ms)
     };
   }
 
   async fetch(request) {
-    if (!this.memState) {
-        this.memState = await this.state.storage.get("state") || this._getInitialState();
-    }
     const url = new URL(request.url);
     switch (url.pathname) {
-      case "/update-score":
-        return this.handleUpdateScore(request);
       case "/rate-limit":
         return this.handleRateLimit(request);
+
       case "/check-locale":
         return this.handleLocaleCheck(request);
+
       case "/get-state":
-        return new Response(JSON.stringify(this.memState), { headers: { 'Content-Type': 'application/json' } });
+        return new Response(JSON.stringify(this.memState), {
+          headers: { "Content-Type": "application/json" },
+        });
+
       default:
         return new Response("Not found", { status: 404 });
     }
   }
 
-  async handleUpdateScore(request) {
-    const { scoreToAdd, config } = await request.json();
-    const now = Date.now();
-    const minutesPassed = Math.floor((now - this.memState.lastUpdated) / DECAY_INTERVAL_MS);
-    if (minutesPassed > 0) {
-      this.memState.score = Math.max(0, this.memState.score - (minutesPassed * SCORE_DECAY_PER_MINUTE));
-    }
-    this.memState.score += scoreToAdd;
-    this.memState.lastUpdated = now;
-
-    let action = "ALLOW";
-    const blockThreshold = config?.thresholds?.block ?? 70;
-    const challengeThreshold = config?.thresholds?.challenge ?? 40;
-
-    if (this.memState.score >= blockThreshold) {
-      action = "BLOCK";
-    } else if (this.memState.score >= challengeThreshold) {
-      action = "CHALLENGE";
-    }
-
-    if (action === "BLOCK") {
-      if (this.memState.hasStrike) {
-        action = "PERMANENT_BLOCK";
-      } else {
-        this.memState.hasStrike = true;
-        action = "TEMP_BLOCK";
-      }
-    }
-    await this.state.storage.put("state", this.memState);
-    return new Response(JSON.stringify({ newScore: this.memState.score, action }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  async handleRateLimit(request) {
+  async handleRateLimit(_request) {
+    // 1分窓、10回まで（safe bot 用）
     const now = Date.now();
     const duration = 60 * 1000;
     const limit = 10;
-    
+
     if (now - (this.memState.rateLimit?.firstRequest || 0) > duration) {
       this.memState.rateLimit = { count: 1, firstRequest: now };
     } else {
       this.memState.rateLimit.count++;
     }
-    await this.state.storage.put("state", this.memState);
+
     const allowed = this.memState.rateLimit.count <= limit;
-    return new Response(JSON.stringify({ allowed }), { headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ allowed }), {
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   async handleLocaleCheck(request) {
-    const { path, config, country } = await request.json();
-    const { lang, country: pathCountry } = parseLocale(path);
-    if (lang === "unknown" || pathCountry === "unknown") {
-      return new Response(JSON.stringify({ violation: false }));
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return new Response("bad json", { status: 400 });
     }
+
+    const { path, config, country } = body || {};
+    const { lang, country: pathCountry } = parseLocale(String(path || "/"));
+
+    if (lang === "unknown" || pathCountry === "unknown") {
+      return new Response(JSON.stringify({ violation: false }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     const now = Date.now();
-    const window = 10 * 1000;
+    const windowMs = 10 * 1000; // 10秒窓
+
+    // 掃除（期限切れを削除）
     this.memState.lgRegions = this.memState.lgRegions || {};
     for (const [key, ts] of Object.entries(this.memState.lgRegions)) {
-        if (now - ts > window) delete this.memState.lgRegions[key];
+      if (now - ts > windowMs) delete this.memState.lgRegions[key];
     }
+
+    // 今回の訪問を記録（メモリのみ）
     const currentKey = `${lang}-${pathCountry}`;
     this.memState.lgRegions[currentKey] = now;
-    const visitedLanguages = new Set(Object.keys(this.memState.lgRegions).map(k => k.split("-")[0]));
 
+    const visitedLanguages = new Set(
+      Object.keys(this.memState.lgRegions).map((k) => k.split("-")[0])
+    );
+
+    // 多言語国家の特別ルール
     const multiLangConfig = config?.multiLanguageCountries?.[country];
     if (multiLangConfig) {
-      const isSubset = [...visitedLanguages].every(l => multiLangConfig.includes(l));
+      const isSubset = [...visitedLanguages].every((l) =>
+        multiLangConfig.includes(l)
+      );
       if (isSubset) {
-        await this.state.storage.put("state", this.memState);
-        return new Response(JSON.stringify({ violation: false, multiLangRule: true }));
+        return new Response(JSON.stringify({ violation: false, multiLangRule: true }), {
+          headers: { "Content-Type": "application/json" },
+        });
       }
     }
 
+    // 違反判定（元ロジック踏襲：3言語以上）
     const violation = visitedLanguages.size >= 3;
-    if(violation) this.memState.lgRegions = {};
-    await this.state.storage.put("state", this.memState);
-    return new Response(JSON.stringify({ violation }), { headers: { 'Content-Type': 'application/json' } });
+    if (violation) this.memState.lgRegions = {}; // 次の判定のためにリセット
+
+    return new Response(JSON.stringify({ violation }), {
+      headers: { "Content-Type": "application/json" },
+    });
   }
 }
 
 function parseLocale(path) {
-  const trimmedPath = path.replace(/^\/+/, "").toLowerCase();
+  const trimmedPath = String(path || "/").replace(/^\/+/, "").toLowerCase();
   const seg = trimmedPath.split("/")[0];
 
   if (seg === "" || seg === "ja") return { lang: "ja", country: "jp" };
