@@ -211,6 +211,19 @@ export default {
 async function handle(request, env, ctx, logBuffer) {
   const url = new URL(request.url);
 
+    // ★ 疎通確認用：これが返れば「このリクエストはWorkerを通っている」
+  if (url.pathname === "/__bb_ping") {
+    return new Response("shopify-bot-blocker: ok", {
+      status: 200,
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+        "x-bot-blocker": "1",
+      },
+    });
+  }
+
+  
   // ==========================================================
   // ★(追加) workers.dev 直叩きの生存確認用
   // - workers.dev は「ルート設定」で rcnir.com に紐づけるのとは別枠
